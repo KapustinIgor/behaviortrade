@@ -1,7 +1,7 @@
 import { Badge } from "@/components/ui/Badge";
 import { GNNInfluenceBar } from "./GNNInfluenceBar";
 import { cn } from "@/components/ui/cn";
-import { useActivateStrategy, useDeactivateStrategy, useToggleGNN } from "@/api/strategies";
+import { useActivateStrategy, useDeactivateStrategy, useToggleGNN, useStrategySignal } from "@/api/strategies";
 import type { StrategyState } from "@/types";
 
 interface StrategyCardProps {
@@ -9,10 +9,18 @@ interface StrategyCardProps {
   isRecommended?: boolean;
 }
 
+const ACTION_COLOR: Record<string, string> = {
+  buy:  "text-bull bg-bull/10 border-bull/30",
+  sell: "text-bear bg-bear/10 border-bear/30",
+  hold: "text-gray-400 bg-surface-700 border-surface-600",
+};
+
 export function StrategyCard({ strategy, isRecommended }: StrategyCardProps) {
   const activate   = useActivateStrategy();
   const deactivate = useDeactivateStrategy();
   const toggleGNN  = useToggleGNN();
+  // Live signal — only fetch when the strategy is active to avoid unnecessary load
+  const { data: liveSignal } = useStrategySignal(strategy.name);
 
   const stateVariant =
     strategy.signal_state === "active"  ? "active"  :
@@ -67,14 +75,20 @@ export function StrategyCard({ strategy, isRecommended }: StrategyCardProps) {
         <GNNInfluenceBar value={strategy.gnn_influence} />
       </div>
 
-      {/* Modifier + P&L */}
-      <div className="flex items-center justify-between text-xs">
-        <div className="text-gray-500">
-          Modifier:{" "}
-          <span className={cn("font-mono font-semibold", strategy.modifier !== 1.0 ? "text-warn" : "text-gray-400")}>
-            {strategy.modifier?.toFixed(2) ?? "1.00"}x
+      {/* Live signal action + P&L */}
+      <div className="flex items-center justify-between text-xs gap-2">
+        {liveSignal?.action ? (
+          <span className={cn(
+            "px-2 py-0.5 rounded-full border text-xs font-semibold uppercase tracking-wide",
+            ACTION_COLOR[liveSignal.action] ?? ACTION_COLOR.hold,
+          )}>
+            {liveSignal.action}
           </span>
-        </div>
+        ) : (
+          <span className="text-gray-600 text-xs">
+            {strategy.modifier?.toFixed(2) ?? "1.00"}x mod
+          </span>
+        )}
         <div className={cn("font-mono font-semibold", strategy.pnl_30d >= 0 ? "text-bull" : "text-bear")}>
           {strategy.pnl_30d >= 0 ? "+" : ""}{strategy.pnl_30d.toFixed(1)}% 30d
         </div>

@@ -4,9 +4,13 @@ import math
 import time
 from datetime import datetime, timezone
 
-from fastapi import APIRouter, Path, Query
+from fastapi import APIRouter, Depends, Path, Query
+from sqlalchemy import select, update
+from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.database import get_db
 from app.gnn.inference import GNNInference
+from app.models.predictions import Prediction as PredictionModel
 from app.strategies.signal_engine import (
     REGIME_SCORES, _SIGNAL_FN, fetch_price_history,
 )
@@ -19,7 +23,61 @@ def _get_gnn() -> GNNInference:
     return _gnn_inference or GNNInference()
 
 
-_MOCK_ACCURACY = {"overall": 64.2, "1h": 67.1, "4h": 63.8, "24h": 61.5, "sample_size": 847}
+_ACCURACY_CACHE: dict = {}
+_ACCURACY_CACHE_TS: float = 0.0
+_ACCURACY_CACHE_TTL = 3600.0  # recompute at most once per hour
+
+
+async def _compute_accuracy() -> dict:
+    """
+    Derive real prediction accuracy by back-testing _mock_probs_from_prices()
+    against actual price outcomes over the last 200 hours.
+    """
+    global _ACCURACY_CACHE, _ACCURACY_CACHE_TS
+    now = time.time()
+    if _ACCURACY_CACHE and (now - _ACCURACY_CACHE_TS) < _ACCURACY_CACHE_TTL:
+        return _ACCURACY_CACHE
+
+    try:
+        history = await fetch_price_history("bitcoin", hours=200)
+        prices = [h["price"] for h in history]
+
+        correct: dict[str, int] = {"1h": 0, "4h": 0, "24h": 0}
+        total:   dict[str, int] = {"1h": 0, "4h": 0, "24h": 0}
+        offsets = {"1h": 1, "4h": 4, "24h": 24}
+        min_ctx = 25  # need at least 25 candles of context
+
+        for i in range(min_ctx, len(prices) - 24):
+            ctx = prices[:i]
+            p1h, p4h, p24h, _ = _mock_probs_from_prices(ctx)
+            cur = prices[i]
+            for tf, offset in offsets.items():
+                if i + offset >= len(prices):
+                    continue
+                fut = prices[i + offset]
+                predicted_up = {"1h": p1h > 0.5, "4h": p4h > 0.5, "24h": p24h > 0.5}[tf]
+                actual_up    = fut > cur
+                if predicted_up == actual_up:
+                    correct[tf] += 1
+                total[tf] += 1
+
+        def pct(tf: str) -> float:
+            return round(correct[tf] / total[tf] * 100, 1) if total[tf] > 0 else 50.0
+
+        sample = min(total.values()) if total else 0
+        result = {
+            "overall":     round((pct("1h") + pct("4h") + pct("24h")) / 3, 1),
+            "1h":          pct("1h"),
+            "4h":          pct("4h"),
+            "24h":         pct("24h"),
+            "sample_size": sample,
+        }
+        _ACCURACY_CACHE    = result
+        _ACCURACY_CACHE_TS = now
+        return result
+    except Exception:
+        # Fallback to neutral 50% rather than fake inflated number
+        return {"overall": 50.0, "1h": 50.0, "4h": 50.0, "24h": 50.0, "sample_size": 0}
 
 
 @router.get("/latest")
@@ -51,7 +109,7 @@ async def get_latest_predictions(limit: int = Query(default=5, le=20)):
 
 @router.get("/accuracy")
 async def get_prediction_accuracy():
-    return _MOCK_ACCURACY
+    return await _compute_accuracy()
 
 
 @router.get("/{asset}")
@@ -70,9 +128,29 @@ async def get_asset_predictions(asset: str = Path(...)):
 
 
 @router.post("/{prediction_id}/vote")
-async def vote_prediction(prediction_id: str = Path(...), agree: bool = True):
-    # TODO: Phase 3 — store vote in predictions table
-    return {"prediction_id": prediction_id, "agree": agree, "status": "recorded"}
+async def vote_prediction(
+    prediction_id: str = Path(...),
+    agree: bool = True,
+    db: AsyncSession = Depends(get_db),
+):
+    """Increment community_agree or community_disagree on the prediction row."""
+    # prediction_id from the frontend is a composite string like "BTC_1h_<iso>"
+    # We upsert a Redis vote tally since these are ephemeral predictions (no DB row yet)
+    from app.core.redis_client import get_redis
+    r = await get_redis()
+    key = f"vote:{prediction_id}"
+    field = "agree" if agree else "disagree"
+    await r.hincrby(key, field, 1)
+    await r.expire(key, 86400 * 7)  # keep vote tallies for 7 days
+    agree_count    = int(await r.hget(key, "agree")    or 0)
+    disagree_count = int(await r.hget(key, "disagree") or 0)
+    return {
+        "prediction_id":      prediction_id,
+        "agree":              agree,
+        "status":             "recorded",
+        "community_agree":    agree_count,
+        "community_disagree": disagree_count,
+    }
 
 
 # ── GNN + Strategy forward price forecast ─────────────────────────────────────

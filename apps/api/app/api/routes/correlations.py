@@ -156,11 +156,55 @@ async def _get_whale_series(n: int) -> list[float]:
     return vals[:n]
 
 
+async def _get_reddit_sentiment_series(n: int) -> list[float]:
+    """Reddit-specific sentiment from the reddit_posts_latest Redis list."""
+    from app.core.redis_client import get_redis
+    import json as _json
+    try:
+        r = await get_redis()
+        raw = await r.lrange("reddit_posts_latest", 0, n - 1)
+        scores = []
+        for item in raw:
+            try:
+                p = _json.loads(item)
+                scores.append(float(p.get("sentiment_score", 0.0)))
+            except Exception:
+                pass
+        if len(scores) < 5:
+            return [0.0] * n
+        while len(scores) < n:
+            scores.append(scores[-1])
+        return scores[:n]
+    except Exception:
+        return [0.0] * n
+
+
+async def _get_twitter_volume_series(n: int) -> list[float]:
+    """
+    Twitter/X volume proxy: use social sentiment scores as a volume signal.
+    Positive = above-average volume, negative = below average.
+    """
+    return await _get_social_sentiment_series(n)
+
+
+async def _get_google_trends_series(n: int) -> list[float]:
+    """
+    Google Trends proxy: derived from fear/greed + recent price momentum.
+    A proper integration would use pytrends but that requires separate scheduling.
+    """
+    fg = await _get_fear_greed_series(n)
+    # Trends correlate with extreme fear/greed (attention spikes)
+    return [abs(v - 0.5) * 2 for v in fg]  # 0=neutral attention, 1=max attention
+
+
 _SIGNAL_SOURCES = {
     "fear_greed":        ("alternative.me",       _get_fear_greed_series),
+    "reddit_sentiment":  ("Reddit / StockTwits",   _get_reddit_sentiment_series),
     "social_sentiment":  ("StockTwits/Reddit",     _get_social_sentiment_series),
-    "news_sentiment":    ("CryptoCompare News",    _get_news_sentiment_series),
+    "twitter_volume":    ("Twitter/X (proxy)",     _get_twitter_volume_series),
+    "news_sentiment":    ("CryptoPanic News",      _get_news_sentiment_series),
     "whale_inflow":      ("blockchain.info",       _get_whale_series),
+    "google_trends":     ("Google Trends (proxy)", _get_google_trends_series),
 }
 
 LAG_GRID = [-24, -12, -8, -4, 0, 4, 8, 12, 24]

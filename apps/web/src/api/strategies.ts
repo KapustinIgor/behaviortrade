@@ -45,10 +45,19 @@ export function useStrategies() {
   });
 }
 
+export interface StrategySignalResponse {
+  name: string;
+  action: "buy" | "sell" | "hold";
+  state: string;
+  modifier: number;
+  gnn_influence: number;
+  timestamp: string;
+}
+
 export function useStrategySignal(name: string) {
-  return useQuery({
+  return useQuery<StrategySignalResponse>({
     queryKey: ["strategy_signal", name],
-    queryFn: () => apiGet(`/strategies/${name}/signal`),
+    queryFn: () => apiGet<StrategySignalResponse>(`/strategies/${name}/signal`),
     enabled: !!name,
     refetchInterval: 15_000,
   });

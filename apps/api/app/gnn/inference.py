@@ -64,6 +64,15 @@ class GNNInference:
             logger.warning("GNN forward pass failed (%s) — falling back to mock", e)
             return await self._mock_scores()
 
+    @property
+    def model_mode(self) -> str:
+        """'trained' if a checkpoint is loaded, 'mock' otherwise."""
+        return "trained" if self._model is not None else "mock"
+
+    @property
+    def checkpoint_loaded(self) -> bool:
+        return self._model is not None
+
     async def get_behavioral_scores(self) -> dict:
         output = await self.predict()
         return {
@@ -77,6 +86,9 @@ class GNNInference:
             "direction_1h":        round(output.direction_1h * 100,         1),
             "direction_4h":        round(output.direction_4h * 100,         1),
             "direction_24h":       round(output.direction_24h * 100,        1),
+            # transparency fields
+            "model_mode":          self.model_mode,
+            "checkpoint_loaded":   self.checkpoint_loaded,
         }
 
     async def build_and_run(self) -> tuple[GNNOutput, object]:

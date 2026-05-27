@@ -417,7 +417,17 @@ export function BehaviorGraph({ onClose }: BehaviorGraphProps) {
               {meta.regime}
             </span>
             <span className="text-gray-500 text-xs">
-              GNN confidence: {(meta.gnn_confidence * 100).toFixed(1)}%
+              GNN confidence: {meta.gnn_confidence.toFixed(1)}%
+            </span>
+            <span
+              className={`px-1.5 py-0.5 rounded text-[10px] font-medium ${
+                meta.model_mode === "trained"
+                  ? "bg-green-500/20 text-green-400"
+                  : "bg-yellow-500/20 text-yellow-400"
+              }`}
+              title={meta.model_mode === "trained" ? "Running on trained GNN checkpoint" : "Using heuristic mock scores — no trained checkpoint loaded"}
+            >
+              {meta.model_mode === "trained" ? "TRAINED" : "MOCK"}
             </span>
             <span className="text-gray-600 text-xs">
               {meta.node_count} nodes · {meta.edge_count} edges

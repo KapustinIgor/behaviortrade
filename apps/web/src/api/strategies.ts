@@ -16,6 +16,11 @@ export interface StrategyPerf {
   trades: number;
   regime_score: number;
   display_name: string;
+  // Backtest quality metrics
+  max_drawdown?: number;
+  sharpe_approx?: number;
+  profit_factor?: number;
+  benchmark_buy_hold_return?: number;
 }
 
 export interface StrategyPerformanceData {

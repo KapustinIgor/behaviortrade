@@ -33,6 +33,8 @@ export interface GraphData {
   meta: {
     regime: string;
     gnn_confidence: number;
+    model_mode: "mock" | "trained";
+    checkpoint_loaded: boolean;
     node_count: number;
     edge_count: number;
     generated_at: number;
@@ -93,6 +95,8 @@ export interface StrategyGraphData {
     asset: string;
     regime: string;
     gnn_confidence: number;
+    model_mode: "mock" | "trained";
+    checkpoint_loaded: boolean;
     node_count: number;
     link_count: number;
     generated_at: number;

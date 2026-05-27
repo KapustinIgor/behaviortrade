@@ -209,6 +209,65 @@ _SIGNAL_SOURCES = {
 
 LAG_GRID = [-24, -12, -8, -4, 0, 4, 8, 12, 24]
 
+# Sources whose data is real/direct vs proxy/derived
+_PROXY_SOURCES  = {"twitter_volume", "google_trends"}
+_DIRECT_SOURCES = {"fear_greed", "whale_inflow"}
+
+
+def _lag_interpretation(lag: int) -> str:
+    if lag == 0:
+        return "simultaneous — signal and price move together"
+    if lag > 0:
+        return f"signal leads price by {lag}h — may predict price {lag}h ahead"
+    return f"price leads signal by {abs(lag)}h — signal is a lagging indicator"
+
+
+def _enrich(row: dict) -> dict:
+    """Attach human-readable interpretation fields to a correlation row."""
+    r   = row["pearson_r"]
+    p   = row["p_value"]
+    n   = row.get("sample_size", 0)
+    lag = row["lag_hours"]
+    sig = row["signal_type"]
+
+    abs_r = abs(r)
+    if abs_r >= 0.7:
+        strength = "strong"
+    elif abs_r >= 0.4:
+        strength = "moderate"
+    elif abs_r >= 0.2:
+        strength = "weak"
+    else:
+        strength = "negligible"
+
+    if sig in _PROXY_SOURCES:
+        data_quality = "proxy"
+        source_type  = "derived"
+        warning      = (
+            f"'{sig}' is a proxy derived from other signals, "
+            "not a direct measurement. Treat with caution."
+        )
+    elif sig in _DIRECT_SOURCES:
+        data_quality = "real"
+        source_type  = "direct"
+        warning      = None
+    else:
+        data_quality = "mixed"
+        source_type  = "composite"
+        warning      = None
+
+    row.update({
+        "strength":              strength,
+        "direction":             "positive" if r >= 0 else "negative",
+        "is_actionable":         abs_r >= 0.4 and p < 0.05 and n >= 30,
+        "effective_sample_size": n,
+        "data_quality":          data_quality,
+        "source_type":           source_type,
+        "warning":               warning,
+        "lag_interpretation":    _lag_interpretation(lag),
+    })
+    return row
+
 
 # ── Routes ─────────────────────────────────────────────────────────────────────
 
@@ -222,7 +281,12 @@ async def get_correlations(
     coin_id = ASSET_TO_COIN.get(asset.upper(), "bitcoin")
     price_changes = await _get_price_changes(coin_id)
     if not price_changes:
-        return {"asset": asset, "correlations": [], "note": "price data unavailable"}
+        return {
+            "asset": asset,
+            "correlations": [],
+            "status": "unavailable",
+            "warning": "Price history unavailable — cannot compute correlations.",
+        }
 
     results = []
     for sig_type, (source, getter) in _SIGNAL_SOURCES.items():
@@ -232,7 +296,7 @@ async def get_correlations(
         lags = [int(lag_hours)] if lag_hours is not None else LAG_GRID
         for lag in lags:
             r, p, r2 = _lagged_pearson(price_changes, sig_data, lag)
-            results.append({
+            row = {
                 "signal_type":   sig_type,
                 "signal_source": source,
                 "asset":         asset,
@@ -241,7 +305,8 @@ async def get_correlations(
                 "p_value":       p,
                 "r_squared":     r2,
                 "sample_size":   len(price_changes),
-            })
+            }
+            results.append(_enrich(row))
 
     results.sort(key=lambda x: abs(x["pearson_r"]), reverse=True)
     return {"asset": asset, "correlations": results[:limit]}
@@ -260,13 +325,15 @@ async def get_top_correlations(
     coin_id = ASSET_TO_COIN.get(asset.upper(), "bitcoin")
     price_changes = await _get_price_changes(coin_id)
     if not price_changes:
+        # No fake fallback — return an honest empty response
         return {
             "asset": asset,
-            "top_correlations": [
-                {"signal_type": "fear_greed", "signal_source": "alternative.me", "lag_hours": -4, "pearson_r": 0.72, "p_value": 0.001, "r_squared": 0.52},
-                {"signal_type": "social_sentiment", "signal_source": "StockTwits", "lag_hours": -8, "pearson_r": 0.61, "p_value": 0.003, "r_squared": 0.37},
-                {"signal_type": "whale_inflow", "signal_source": "blockchain.info", "lag_hours": 2, "pearson_r": -0.58, "p_value": 0.005, "r_squared": 0.34},
-            ][:limit],
+            "top_correlations": [],
+            "status": "unavailable",
+            "warning": (
+                "Price history could not be fetched. "
+                "Correlations require live data and cannot be estimated."
+            ),
         }
 
     # Find best lag per signal type
@@ -274,12 +341,12 @@ async def get_top_correlations(
     for sig_type, (source, getter) in _SIGNAL_SOURCES.items():
         sig_data = await getter(len(price_changes))
         best_r, best_lag = 0.0, 0
-        best_p, best_r2 = 1.0, 0.0
+        best_p, best_r2  = 1.0, 0.0
         for lag in LAG_GRID:
             r, p, r2 = _lagged_pearson(price_changes, sig_data, lag)
             if abs(r) > abs(best_r):
                 best_r, best_lag, best_p, best_r2 = r, lag, p, r2
-        best.append({
+        row = {
             "signal_type":   sig_type,
             "signal_source": source,
             "lag_hours":     best_lag,
@@ -287,7 +354,8 @@ async def get_top_correlations(
             "p_value":       best_p,
             "r_squared":     best_r2,
             "sample_size":   len(price_changes),
-        })
+        }
+        best.append(_enrich(row))
 
     best.sort(key=lambda x: abs(x["pearson_r"]), reverse=True)
     return {"asset": asset, "top_correlations": best[:limit]}

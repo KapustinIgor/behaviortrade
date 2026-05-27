@@ -89,6 +89,15 @@ export interface CorrelationResult {
   p_value: number;
   r_squared: number;
   sample_size: number;
+  // Enriched fields
+  strength?: "strong" | "moderate" | "weak" | "negligible";
+  direction?: "positive" | "negative";
+  is_actionable?: boolean;
+  effective_sample_size?: number;
+  data_quality?: "real" | "proxy" | "mixed";
+  source_type?: "direct" | "derived" | "composite";
+  warning?: string | null;
+  lag_interpretation?: string;
 }
 
 export interface WhaleFlow {

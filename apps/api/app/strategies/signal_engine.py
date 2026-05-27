@@ -288,52 +288,122 @@ def simulate_equity(
     signals: list[str],
     leverage: float = 1.0,
     start: float = 10_000.0,
+    fee_rate: float = 0.001,        # 0.1% taker fee per side
+    slippage_rate: float = 0.0005,  # 0.05% slippage per trade
 ) -> tuple[list[float], dict]:
     """
-    Simulate portfolio value over time.
+    Simulate portfolio value over time with realistic transaction costs.
+
     Returns (equity_pct_series, stats).
     equity_pct_series[i] = % return from start at time i.
+
+    Fee model: on buy we pay fee_rate on cash deployed; on sell we pay
+    fee_rate on gross proceeds. Slippage worsens fill prices by
+    slippage_rate (buy higher, sell lower).
     """
     cash      = start
     position  = 0.0   # units of asset held
-    entry     = 0.0
+    entry     = 0.0   # effective entry price (including slippage)
     trades    = 0
     wins      = 0
-    equity    = []
-    events: list[dict] = []
+    equity:  list[float] = []
+    events:  list[dict]  = []
+
+    peak_value        = start
+    max_dd            = 0.0
+    pnl_wins_total    = 0.0
+    pnl_losses_total  = 0.0
 
     for i, (price, sig) in enumerate(zip(prices, signals)):
         if sig == "buy" and position == 0.0 and price > 0:
-            position  = (cash * leverage) / price
-            entry     = price
+            # Effective buy price: worse by slippage
+            effective_buy = price * (1.0 + slippage_rate)
+            # Fee deducted from cash before buying
+            available = cash * (1.0 - fee_rate)
+            position  = (available * leverage) / effective_buy
+            entry     = effective_buy
             cash      = 0.0
+
         elif sig == "sell" and position > 0.0:
-            pnl = position * price - (position * entry)
-            cash = position * price
+            old_position = position
+            # Effective sell price: worse by slippage
+            effective_sell = price * (1.0 - slippage_rate)
+            gross          = old_position * effective_sell
+            # Fee deducted from proceeds
+            net            = gross * (1.0 - fee_rate)
+            cost_basis     = old_position * entry
+            pnl            = net - cost_basis
+            pnl_pct        = round(pnl / cost_basis * 100, 2) if cost_basis > 0 else 0.0
+
+            cash     = net
             position = 0.0
-            trades += 1
+            trades  += 1
             if pnl > 0:
                 wins += 1
-            events.append({"idx": i, "action": "sell", "pnl_pct": round(pnl / (position * entry + 1e-9) * 100, 2)})
+                pnl_wins_total += pnl
+            else:
+                pnl_losses_total += abs(pnl)
+
+            events.append({"idx": i, "action": "sell", "pnl_pct": pnl_pct})
 
         current_value = cash + position * price
         equity.append(round((current_value / start - 1) * 100, 3))
 
+        # Track max drawdown
+        if current_value > peak_value:
+            peak_value = current_value
+        dd = (peak_value - current_value) / peak_value * 100 if peak_value > 0 else 0.0
+        if dd > max_dd:
+            max_dd = dd
+
     # Close any open position at last price
     if position > 0 and prices:
-        cash = position * prices[-1]
-        trades += 1
-        if prices[-1] > entry:
+        effective_sell = prices[-1] * (1.0 - slippage_rate)
+        gross          = position * effective_sell
+        net            = gross * (1.0 - fee_rate)
+        cost_basis     = position * entry
+        pnl            = net - cost_basis
+        cash           = net
+        trades        += 1
+        if pnl > 0:
             wins += 1
+            pnl_wins_total += pnl
+        else:
+            pnl_losses_total += abs(pnl)
 
-    final_value   = cash or start
-    total_return  = round((final_value / start - 1) * 100, 2)
-    win_rate      = round(wins / trades * 100, 1) if trades else 0.0
+    final_value  = cash if cash > 0 else start
+    total_return = round((final_value / start - 1) * 100, 2)
+    win_rate     = round(wins / trades * 100, 1) if trades else 0.0
+
+    # Approximate annualised Sharpe (assumes hourly series)
+    sharpe = 0.0
+    if len(equity) > 2:
+        changes  = [equity[i] - equity[i - 1] for i in range(1, len(equity))]
+        mean_c   = sum(changes) / len(changes)
+        var_c    = sum((c - mean_c) ** 2 for c in changes) / len(changes)
+        std_c    = math.sqrt(var_c) if var_c > 0 else 1e-9
+        # Annualise: hourly → 8760 periods/year
+        sharpe   = round(mean_c / std_c * math.sqrt(8760), 3)
+
+    # Profit factor
+    if pnl_losses_total > 0:
+        profit_factor = round(min(pnl_wins_total / pnl_losses_total, 99.9), 3)
+    elif pnl_wins_total > 0:
+        profit_factor = 99.9
+    else:
+        profit_factor = 0.0
+
+    # Buy-and-hold benchmark
+    benchmark = round((prices[-1] / prices[0] - 1) * 100, 2) if prices and prices[0] > 0 else 0.0
 
     return equity, {
-        "total_return": total_return,
-        "win_rate":     win_rate,
-        "trades":       trades,
+        "total_return":               total_return,
+        "win_rate":                   win_rate,
+        "trades":                     trades,
+        "max_drawdown":               round(max_dd, 2),
+        "sharpe_approx":              sharpe,
+        "profit_factor":              profit_factor,
+        "benchmark_buy_hold_return":  benchmark,
     }
 
 
@@ -470,12 +540,16 @@ async def compute_performance(asset: str, gnn_output=None) -> dict:
             ][-30:]  # last 30 events max
 
             strategies_out[name] = {
-                "equity":       equity,
-                "signals":      events,
-                "total_return": stats["total_return"],
-                "win_rate":     stats["win_rate"],
-                "trades":       stats["trades"],
-                "regime_score": round(regime_map.get(name, 0.5), 3),
+                "equity":                     equity,
+                "signals":                    events,
+                "total_return":               stats["total_return"],
+                "win_rate":                   stats["win_rate"],
+                "trades":                     stats["trades"],
+                "max_drawdown":               stats.get("max_drawdown", 0.0),
+                "sharpe_approx":              stats.get("sharpe_approx", 0.0),
+                "profit_factor":              stats.get("profit_factor", 0.0),
+                "benchmark_buy_hold_return":  stats.get("benchmark_buy_hold_return", 0.0),
+                "regime_score":               round(regime_map.get(name, 0.5), 3),
             }
         except Exception as e:
             logger.debug("Strategy %s failed: %s", name, e)
@@ -501,11 +575,15 @@ async def compute_performance(asset: str, gnn_output=None) -> dict:
         "prices":      prices,
         "strategies":  strategies_out,
         "combo": {
-            "equity":       combo_eq,
-            "signals":      combo_events,
-            "total_return": combo_stats["total_return"],
-            "win_rate":     combo_stats["win_rate"],
-            "trades":       combo_stats["trades"],
+            "equity":                    combo_eq,
+            "signals":                   combo_events,
+            "total_return":              combo_stats["total_return"],
+            "win_rate":                  combo_stats["win_rate"],
+            "trades":                    combo_stats["trades"],
+            "max_drawdown":              combo_stats.get("max_drawdown", 0.0),
+            "sharpe_approx":             combo_stats.get("sharpe_approx", 0.0),
+            "profit_factor":             combo_stats.get("profit_factor", 0.0),
+            "benchmark_buy_hold_return": combo_stats.get("benchmark_buy_hold_return", 0.0),
         },
         "gnn_regime":  regime,
         "recommended": recommended,

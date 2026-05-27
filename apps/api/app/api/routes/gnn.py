@@ -97,12 +97,16 @@ async def get_graph() -> dict[str, Any]:
     # ── Get GNN output (regime / confidence) ──────────────────────────────
     regime = "sideways"
     confidence = 50.0
+    model_mode = "mock"
+    checkpoint_loaded = False
     try:
         from app.gnn.inference import GNNInference
         gnn = GNNInference()
         scores = await gnn.get_behavioral_scores()
-        regime = scores.get("regime", "sideways")
-        confidence = scores.get("confidence", 50.0)
+        regime            = scores.get("regime", "sideways")
+        confidence        = scores.get("confidence", 50.0)
+        model_mode        = scores.get("model_mode", "mock")
+        checkpoint_loaded = scores.get("checkpoint_loaded", False)
     except Exception as exc:
         logger.warning("GNN inference skipped during graph export: %s", exc)
 
@@ -186,11 +190,13 @@ async def get_graph() -> dict[str, Any]:
         "nodes": nodes,
         "edges": edges,
         "meta": {
-            "regime":        regime,
-            "gnn_confidence": confidence,
-            "node_count":    len(nodes),
-            "edge_count":    len(edges),
-            "generated_at":  int(time.time()),
+            "regime":           regime,
+            "gnn_confidence":   confidence,
+            "model_mode":       model_mode,
+            "checkpoint_loaded": checkpoint_loaded,
+            "node_count":       len(nodes),
+            "edge_count":       len(edges),
+            "generated_at":     int(time.time()),
         },
     }
 
@@ -275,10 +281,12 @@ async def get_strategy_graph(asset: str = "BTC"):
     from app.main import _gnn_inference
 
     gnn: GNNInference = _gnn_inference or GNNInference()
-    gnn_out   = await gnn.predict()
-    scores    = await gnn.get_behavioral_scores()
-    regime    = getattr(gnn_out, "regime", "sideways")
-    regime_sc = REGIME_SCORES.get(regime, REGIME_SCORES["sideways"])
+    gnn_out    = await gnn.predict()
+    scores     = await gnn.get_behavioral_scores()
+    regime     = getattr(gnn_out, "regime", "sideways")
+    regime_sc  = REGIME_SCORES.get(regime, REGIME_SCORES["sideways"])
+    _model_mode       = gnn.model_mode
+    _checkpoint_loaded = gnn.checkpoint_loaded
 
     # ── Fetch performance data ────────────────────────────────────────────────
     perf = await compute_performance(asset.upper(), gnn_out)
@@ -481,11 +489,13 @@ async def get_strategy_graph(asset: str = "BTC"):
         "nodes": nodes,
         "links": links,
         "meta": {
-            "asset":          asset.upper(),
-            "regime":         regime,
-            "gnn_confidence": round(scores.get("confidence", 50), 1),
-            "node_count":     len(nodes),
-            "link_count":     len(links),
-            "generated_at":   int(time.time()),
+            "asset":             asset.upper(),
+            "regime":            regime,
+            "gnn_confidence":    round(scores.get("confidence", 50), 1),
+            "model_mode":        _model_mode,
+            "checkpoint_loaded": _checkpoint_loaded,
+            "node_count":        len(nodes),
+            "link_count":        len(links),
+            "generated_at":      int(time.time()),
         },
     }

@@ -212,7 +212,19 @@ export function CorrelationExplorer({ onClose }: CorrelationExplorerProps) {
                       }}
                       className="bg-surface-700 hover:bg-surface-600 rounded-lg p-3 text-xs space-y-1 text-left transition-colors border border-transparent hover:border-brand/30"
                     >
-                      <div className="font-semibold text-gray-300 truncate">{c.signal_source}</div>
+                      <div className="flex items-center gap-1.5">
+                        <span className="font-semibold text-gray-300 truncate flex-1">{c.signal_source}</span>
+                        {c.data_quality && (
+                          <span className={cn(
+                            "px-1 py-0.5 rounded text-[9px] font-medium flex-shrink-0",
+                            c.data_quality === "real" ? "bg-green-500/20 text-green-400" :
+                            c.data_quality === "proxy" ? "bg-yellow-500/20 text-yellow-400" :
+                            "bg-gray-500/20 text-gray-400"
+                          )}>
+                            {c.data_quality?.toUpperCase()}
+                          </span>
+                        )}
+                      </div>
                       <div className="flex justify-between text-gray-500">
                         <span>Pearson R</span>
                         <span className={cn("font-mono font-semibold", c.pearson_r > 0 ? "text-bull" : "text-bear")}>
@@ -224,9 +236,16 @@ export function CorrelationExplorer({ onClose }: CorrelationExplorerProps) {
                         <span className="font-mono">{c.lag_hours}h</span>
                       </div>
                       <div className="flex justify-between text-gray-500">
-                        <span>R²</span>
-                        <span className="font-mono">{c.r_squared.toFixed(3)}</span>
+                        <span>Strength</span>
+                        <span className={cn("font-mono capitalize", {
+                          "text-green-400": c.strength === "strong",
+                          "text-yellow-400": c.strength === "moderate",
+                          "text-gray-400": c.strength === "weak" || c.strength === "negligible",
+                        })}>{c.strength ?? "—"}</span>
                       </div>
+                      {c.warning && (
+                        <p className="text-[9px] text-yellow-400/70 leading-tight mt-0.5">{c.warning}</p>
+                      )}
                     </button>
                   ))}
                 </div>

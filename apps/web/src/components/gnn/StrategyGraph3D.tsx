@@ -123,7 +123,7 @@ function NodeDetailPanel({ node, onClose }: { node: StrategyGraphNode; onClose: 
 
 // ── Legend ────────────────────────────────────────────────────────────────────
 
-function Legend({ regime, confidence }: { regime: string; confidence: number }) {
+function Legend({ regime, confidence, modelMode }: { regime: string; confidence: number; modelMode?: string }) {
   return (
     <div className="absolute bottom-4 left-4 space-y-2 pointer-events-none">
       <div className="bg-surface-800/80 backdrop-blur rounded-xl px-3 py-2 space-y-1.5">
@@ -151,6 +151,15 @@ function Legend({ regime, confidence }: { regime: string; confidence: number }) 
         <p className="text-xs font-semibold capitalize text-warn">{regime}</p>
         <p className="text-[10px] text-gray-500">{confidence.toFixed(0)}% confidence</p>
       </div>
+      {modelMode === "mock" && (
+        <div className="bg-yellow-500/10 border border-yellow-500/30 rounded-xl px-3 py-2">
+          <p className="text-[10px] text-yellow-400 font-semibold">Research Mode</p>
+          <p className="text-[10px] text-yellow-400/70 mt-0.5">
+            Scores are heuristic estimates.<br />
+            Not for live trading decisions.
+          </p>
+        </div>
+      )}
     </div>
   );
 }
@@ -287,11 +296,23 @@ export function StrategyGraph3D({ onClose }: StrategyGraph3DProps) {
           <div>
             <h2 className="text-base font-bold text-white">Strategy GNN Graph — 3D</h2>
             {meta && (
-              <p className="text-xs text-gray-500 mt-0.5">
-                {selectedAsset} · {meta.node_count} nodes · {meta.link_count} links ·{" "}
-                <span className="capitalize text-warn">{meta.regime}</span>{" "}
-                regime · {meta.gnn_confidence.toFixed(0)}% confidence
-              </p>
+              <div className="flex items-center gap-2 mt-0.5">
+                <p className="text-xs text-gray-500">
+                  {selectedAsset} · {meta.node_count} nodes · {meta.link_count} links ·{" "}
+                  <span className="capitalize text-warn">{meta.regime}</span>{" "}
+                  regime · {meta.gnn_confidence.toFixed(0)}% confidence
+                </p>
+                <span
+                  className={`px-1.5 py-0.5 rounded text-[10px] font-medium ${
+                    meta.model_mode === "trained"
+                      ? "bg-green-500/20 text-green-400"
+                      : "bg-yellow-500/20 text-yellow-400"
+                  }`}
+                  title={meta.model_mode === "trained" ? "Trained GNN checkpoint" : "Heuristic mock scores — no trained checkpoint"}
+                >
+                  {meta.model_mode === "trained" ? "TRAINED" : "MOCK"}
+                </span>
+              </div>
             )}
           </div>
 
@@ -401,7 +422,7 @@ export function StrategyGraph3D({ onClose }: StrategyGraph3DProps) {
 
         {/* Legend */}
         {meta && !isLoading && (
-          <Legend regime={meta.regime} confidence={meta.gnn_confidence} />
+          <Legend regime={meta.regime} confidence={meta.gnn_confidence} modelMode={meta.model_mode} />
         )}
 
         {/* Bottom hint */}

@@ -246,17 +246,23 @@ app.add_middleware(
 )
 
 # ── Routers ───────────────────────────────────────────────────────────────────
-from app.api.routes import behavioral, copilot, correlations, gnn as gnn_routes, news, predictions, prices, social, strategies  # noqa: E402
+from app.api.routes import (  # noqa: E402
+    behavioral, copilot, correlations, gnn as gnn_routes,
+    news, predictions, prices, social, strategies,
+    paper_trades, alerts,
+)
 
-app.include_router(prices.router, prefix="/api/prices", tags=["prices"])
-app.include_router(behavioral.router, prefix="/api/behavioral", tags=["behavioral"])
-app.include_router(predictions.router, prefix="/api/predictions", tags=["predictions"])
-app.include_router(strategies.router, prefix="/api/strategies", tags=["strategies"])
-app.include_router(news.router, prefix="/api/news", tags=["news"])
-app.include_router(social.router, prefix="/api/social", tags=["social"])
+app.include_router(prices.router,       prefix="/api/prices",       tags=["prices"])
+app.include_router(behavioral.router,   prefix="/api/behavioral",   tags=["behavioral"])
+app.include_router(predictions.router,  prefix="/api/predictions",  tags=["predictions"])
+app.include_router(strategies.router,   prefix="/api/strategies",   tags=["strategies"])
+app.include_router(news.router,         prefix="/api/news",         tags=["news"])
+app.include_router(social.router,       prefix="/api/social",       tags=["social"])
 app.include_router(correlations.router, prefix="/api/correlations", tags=["correlations"])
-app.include_router(gnn_routes.router, prefix="/api/gnn", tags=["gnn"])
-app.include_router(copilot.router, prefix="/api/copilot", tags=["copilot"])
+app.include_router(gnn_routes.router,   prefix="/api/gnn",          tags=["gnn"])
+app.include_router(copilot.router,      prefix="/api/copilot",      tags=["copilot"])
+app.include_router(paper_trades.router, prefix="/api/paper-trades", tags=["paper-trades"])
+app.include_router(alerts.router,       prefix="/api/alerts",       tags=["alerts"])
 
 
 @app.get("/health")

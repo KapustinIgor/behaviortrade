@@ -1,0 +1,45 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+dist/
+build/
+.eggs/
+*.egg
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Environment / secrets
+.env
+*.env.local
+
+# ML models & checkpoints
+apps/api/models/
+*.pt
+*.pth
+*.ckpt
+
+# Historical data cache
+apps/api/data/
+
+# Logs
+*.log
+logs/
+
+# Node
+node_modules/
+apps/web/dist/
+apps/web/.vite/
+
+# Misc
+.DS_Store
+.idea/
+.vscode/
+*.swp
+*.swo

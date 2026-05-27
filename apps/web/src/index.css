@@ -1,0 +1,32 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  * {
+    box-sizing: border-box;
+  }
+  body {
+    @apply bg-surface-900 text-gray-100 font-sans antialiased;
+    margin: 0;
+  }
+  ::-webkit-scrollbar {
+    width: 6px;
+    height: 6px;
+  }
+  ::-webkit-scrollbar-track {
+    @apply bg-surface-800;
+  }
+  ::-webkit-scrollbar-thumb {
+    @apply bg-surface-600 rounded-full;
+  }
+}
+
+@layer utilities {
+  .panel {
+    @apply bg-surface-800 border border-surface-700 rounded-xl;
+  }
+  .panel-sm {
+    @apply bg-surface-800 border border-surface-700 rounded-lg;
+  }
+}

@@ -193,3 +193,299 @@ async def get_graph() -> dict[str, Any]:
             "generated_at":  int(time.time()),
         },
     }
+
+
+# ── Strategy 3-D graph ────────────────────────────────────────────────────────
+
+def _pearson_r(a: list[float], b: list[float]) -> float:
+    """Fast Pearson correlation between two equity curves."""
+    n = min(len(a), len(b))
+    if n < 3:
+        return 0.0
+    xs, ys = a[:n], b[:n]
+    mx = sum(xs) / n
+    my = sum(ys) / n
+    num = sum((x - mx) * (y - my) for x, y in zip(xs, ys))
+    dx  = math.sqrt(sum((x - mx) ** 2 for x in xs))
+    dy  = math.sqrt(sum((y - my) ** 2 for y in ys))
+    return round(num / (dx * dy), 4) if dx * dy > 0 else 0.0
+
+
+def _regime_color(score: float) -> str:
+    """Green (good fit) → amber → red (poor fit)."""
+    if score >= 0.75:  return "#22c55e"
+    if score >= 0.50:  return "#f59e0b"
+    return "#ef4444"
+
+
+def _combo_color(avg_pnl: float) -> str:
+    if avg_pnl > 5:   return "#818cf8"
+    if avg_pnl > 0:   return "#6366f1"
+    return "#4f46e5"
+
+
+_BEHAVIORAL_NODES = [
+    {"id": "beh_fear_greed",  "name": "Fear & Greed",    "color": "#f472b6"},
+    {"id": "beh_whale",       "name": "Whale Flow",       "color": "#60a5fa"},
+    {"id": "beh_social",      "name": "Social Sentiment", "color": "#a78bfa"},
+    {"id": "beh_news",        "name": "News Shock",       "color": "#fb923c"},
+    {"id": "beh_accumulate",  "name": "Accumulation",     "color": "#34d399"},
+]
+
+# Which behavioral signal influences which strategy (weight 0–1)
+_BEHAVIORAL_INFLUENCES: dict[str, list[tuple[str, float]]] = {
+    "beh_fear_greed":  [("DCA", 0.8), ("HODL", 0.7), ("SCALPING", 0.5), ("FUTURES", 0.6)],
+    "beh_whale":       [("SWING", 0.75), ("TREND_FOLLOWING", 0.7), ("ARBITRAGE", 0.6)],
+    "beh_social":      [("NEWS_SENTIMENT", 0.9), ("DAY_TRADING", 0.65), ("SCALPING", 0.55)],
+    "beh_news":        [("NEWS_SENTIMENT", 0.95), ("SWING", 0.6), ("FUTURES", 0.55)],
+    "beh_accumulate":  [("DCA", 0.85), ("RANGE", 0.7), ("HODL", 0.65), ("DEFI_YIELD", 0.6)],
+}
+
+_REGIME_NODE_COLORS = {
+    "bull":       "#22c55e",
+    "bear":       "#ef4444",
+    "sideways":   "#f59e0b",
+    "transition": "#6b7280",
+}
+
+
+@router.get("/strategy-graph")
+async def get_strategy_graph(asset: str = "BTC"):
+    """
+    3-D force graph of all 12 strategies + top synergy combos.
+
+    Nodes
+    ─────
+    • strategy      — one per strategy, sized by |pnl_30d|, colored by regime fit
+    • combo         — top-5 pairwise combos by synergy score
+    • regime        — 4 regime nodes (current regime glows)
+    • behavioral    — 5 behavioral signal drivers
+
+    Links
+    ─────
+    • synergy       — between strategies: 1 − |pearsonR(equity_A, equity_B)|
+                      (orthogonal = good diversification)
+    • regime_fit    — strategy → regime node, weight = fit score
+    • combo_member  — combo → each member strategy
+    • beh_influence — behavioral node → strategy, weight = influence weight
+    """
+    from app.strategies import STRATEGY_REGISTRY
+    from app.strategies.signal_engine import REGIME_SCORES, compute_performance
+    from app.gnn.inference import GNNInference
+    from app.main import _gnn_inference
+
+    gnn: GNNInference = _gnn_inference or GNNInference()
+    gnn_out   = await gnn.predict()
+    scores    = await gnn.get_behavioral_scores()
+    regime    = getattr(gnn_out, "regime", "sideways")
+    regime_sc = REGIME_SCORES.get(regime, REGIME_SCORES["sideways"])
+
+    # ── Fetch performance data ────────────────────────────────────────────────
+    perf = await compute_performance(asset.upper(), gnn_out)
+    strat_data = perf.get("strategies", {})
+    prices_len = len(perf.get("prices", []))
+
+    # active set (in-memory from strategies route)
+    try:
+        from app.api.routes.strategies import _active_strategies
+    except Exception:
+        _active_strategies = set()
+
+    # ── Strategy nodes ────────────────────────────────────────────────────────
+    nodes: list[dict] = []
+    equities: dict[str, list[float]] = {}
+    strat_meta: dict[str, dict] = {}
+
+    REGIME_NAMES = list(REGIME_SCORES.keys())   # bull, bear, sideways, transition
+    N = len(STRATEGY_REGISTRY)
+    for i, (name, cls) in enumerate(STRATEGY_REGISTRY.items()):
+        sd = strat_data.get(name, {})
+        pnl        = sd.get("total_return", 0.0)
+        win_rate   = sd.get("win_rate", 0.0)
+        equity     = sd.get("equity", [])
+        fit        = regime_sc.get(name, 0.5)
+        is_active  = name in _active_strategies
+
+        # arrange in a ring
+        angle = (i / N) * 2 * math.pi
+        radius = 120
+        x = round(radius * math.cos(angle), 1)
+        z = round(radius * math.sin(angle), 1)
+        y = round(pnl * 1.5, 1)   # vertical axis = performance
+
+        equities[name] = equity
+        strat_meta[name] = {"pnl": pnl, "fit": fit, "win_rate": win_rate}
+
+        nodes.append({
+            "id":          name,
+            "name":        cls.display_name,
+            "type":        "strategy",
+            "group":       0,
+            "val":         max(3, min(20, 5 + abs(pnl) * 0.8)),
+            "color":       "#818cf8" if is_active else _regime_color(fit),
+            "pnl_30d":     round(pnl, 2),
+            "win_rate":    round(win_rate, 1),
+            "regime_score": round(fit * 100, 1),
+            "is_active":   is_active,
+            "description": cls.description,
+            "fx": x, "fy": y, "fz": z,
+        })
+
+    # ── Compute pairwise equity correlations ──────────────────────────────────
+    strat_names = list(STRATEGY_REGISTRY.keys())
+    corr_matrix: dict[tuple[str, str], float] = {}
+    for i in range(len(strat_names)):
+        for j in range(i + 1, len(strat_names)):
+            a, b = strat_names[i], strat_names[j]
+            ea, eb = equities.get(a, []), equities.get(b, [])
+            r = _pearson_r(ea, eb) if ea and eb else 0.0
+            corr_matrix[(a, b)] = r
+
+    # ── Top combo nodes (best synergy = high avg pnl + low correlation) ───────
+    combo_scores: list[tuple[float, str, str]] = []
+    for (a, b), r in corr_matrix.items():
+        pa = strat_meta[a]["pnl"]
+        pb = strat_meta[b]["pnl"]
+        avg_pnl   = (pa + pb) / 2
+        synergy   = (1 - abs(r)) * max(0.01, avg_pnl + 10) / 10  # diversification × profit
+        combo_scores.append((synergy, a, b))
+    combo_scores.sort(reverse=True)
+
+    top_combos = combo_scores[:5]
+    combo_equity_lookup: dict[str, list[float]] = {}
+
+    for rank, (syn, a, b) in enumerate(top_combos):
+        ea = equities.get(a, [])
+        eb = equities.get(b, [])
+        n  = min(len(ea), len(eb))
+        combo_eq = [(ea[i] + eb[i]) / 2 for i in range(n)] if n > 0 else []
+        combo_pnl = combo_eq[-1] if combo_eq else 0.0
+        combo_id  = f"COMBO_{a}_{b}"
+        combo_equity_lookup[combo_id] = combo_eq
+
+        # Position combos in an inner ring above strategies
+        angle  = rank * 2 * math.pi / len(top_combos)
+        radius = 55
+        nodes.append({
+            "id":          combo_id,
+            "name":        f"{STRATEGY_REGISTRY[a].display_name} + {STRATEGY_REGISTRY[b].display_name}",
+            "type":        "combo",
+            "group":       1,
+            "val":         max(6, min(25, 8 + abs(combo_pnl) * 0.6)),
+            "color":       _combo_color(combo_pnl),
+            "pnl_30d":     round(combo_pnl, 2),
+            "synergy":     round(syn, 3),
+            "correlation": round(corr_matrix.get((a, b), corr_matrix.get((b, a), 0)), 3),
+            "members":     [a, b],
+            "fx": round(radius * math.cos(angle), 1),
+            "fy": round(combo_pnl * 1.5 + 20, 1),
+            "fz": round(radius * math.sin(angle), 1),
+        })
+
+    # ── Regime nodes ─────────────────────────────────────────────────────────
+    regime_positions = [
+        (160, 80, 0), (-160, 80, 0), (0, 80, 160), (0, 80, -160)
+    ]
+    for ri, (rname, (rx, ry, rz)) in enumerate(zip(REGIME_NAMES, regime_positions)):
+        nodes.append({
+            "id":       f"regime_{rname}",
+            "name":     rname.capitalize(),
+            "type":     "regime",
+            "group":    2,
+            "val":      10 if rname == regime else 6,
+            "color":    _REGIME_NODE_COLORS.get(rname, "#6b7280"),
+            "current":  rname == regime,
+            "fx": rx, "fy": ry, "fz": rz,
+        })
+
+    # ── Behavioral signal nodes ───────────────────────────────────────────────
+    score_map = {
+        "beh_fear_greed": scores.get("greed_score", 50) / 100,
+        "beh_whale":      0.5,
+        "beh_social":     scores.get("greed_score", 50) / 100,
+        "beh_news":       scores.get("news_shock_score", 50) / 100,
+        "beh_accumulate": scores.get("accumulation_score", 50) / 100,
+    }
+    for bi, bnode in enumerate(_BEHAVIORAL_NODES):
+        angle  = bi * 2 * math.pi / len(_BEHAVIORAL_NODES)
+        radius = 220
+        nodes.append({
+            **bnode,
+            "type":  "behavioral",
+            "group": 3,
+            "val":   max(4, round(score_map.get(bnode["id"], 0.5) * 12, 1)),
+            "score": round(score_map.get(bnode["id"], 0.5) * 100, 1),
+            "fx": round(radius * math.cos(angle), 1),
+            "fy": 0.0,
+            "fz": round(radius * math.sin(angle), 1),
+        })
+
+    # ── Links ─────────────────────────────────────────────────────────────────
+    links: list[dict] = []
+
+    # Strategy ↔ strategy synergy (only show meaningful ones: abs_r < 0.6 or both pnl > 0)
+    for (a, b), r in corr_matrix.items():
+        pa = strat_meta[a]["pnl"]
+        pb = strat_meta[b]["pnl"]
+        if abs(r) < 0.5 or (pa > 0 and pb > 0):
+            links.append({
+                "source":  a,
+                "target":  b,
+                "value":   round(1 - abs(r), 3),   # thickness = diversification
+                "type":    "synergy",
+                "color":   "#22c55e" if r < 0.2 else "#6b7280",
+                "label":   f"r={r:.2f}",
+            })
+
+    # Combo → member
+    for node in nodes:
+        if node["type"] != "combo":
+            continue
+        for member in node.get("members", []):
+            links.append({
+                "source": node["id"],
+                "target": member,
+                "value":  2,
+                "type":   "combo_member",
+                "color":  "#818cf8",
+            })
+
+    # Strategy → regime fit (only the current regime)
+    for name in STRATEGY_REGISTRY:
+        fit = regime_sc.get(name, 0.5)
+        if fit >= 0.5:   # only show meaningful fits
+            links.append({
+                "source": name,
+                "target": f"regime_{regime}",
+                "value":  round(fit * 3, 2),
+                "type":   "regime_fit",
+                "color":  _regime_color(fit),
+                "label":  f"{round(fit*100)}%",
+            })
+
+    # Behavioral → strategy influence
+    for beh_id, influences in _BEHAVIORAL_INFLUENCES.items():
+        for strat_name, weight in influences:
+            if strat_name in STRATEGY_REGISTRY:
+                links.append({
+                    "source": beh_id,
+                    "target": strat_name,
+                    "value":  round(weight * 2, 2),
+                    "type":   "beh_influence",
+                    "color":  next(
+                        (n["color"] for n in _BEHAVIORAL_NODES if n["id"] == beh_id), "#6b7280"
+                    ),
+                })
+
+    return {
+        "nodes": nodes,
+        "links": links,
+        "meta": {
+            "asset":          asset.upper(),
+            "regime":         regime,
+            "gnn_confidence": round(scores.get("confidence", 50), 1),
+            "node_count":     len(nodes),
+            "link_count":     len(links),
+            "generated_at":   int(time.time()),
+        },
+    }

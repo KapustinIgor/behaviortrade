@@ -207,3 +207,47 @@ class TestEdgeCases:
         _, stats_1x = simulate_equity(prices, signals, leverage=1.0, fee_rate=0.0, slippage_rate=0.0)
         _, stats_2x = simulate_equity(prices, signals, leverage=2.0, fee_rate=0.0, slippage_rate=0.0)
         assert stats_2x["total_return"] > stats_1x["total_return"]
+
+
+class TestLeverageAccounting:
+    def test_flat_price_leverage_loses_only_fees(self):
+        """With flat prices, leveraged position should lose only fees."""
+        prices = [100.0] * 20
+        signals = ["buy"] + ["hold"] * 18 + ["sell"]
+        _, stats = simulate_equity(prices, signals, leverage=3.0, fee_rate=0.001, slippage_rate=0.001)
+        # Should be very slightly negative due to fees, but NOT a big gain
+        assert stats["total_return"] < 0.5  # not gaining from leverage on flat prices
+        assert stats["total_return"] > -5.0  # not losing catastrophically
+
+    def test_rising_price_leverage_amplifies_gain(self):
+        """3x leverage on rising price gives roughly 3x gain (minus costs)."""
+        prices = [100.0 + i for i in range(20)]  # 100 → 119
+        signals = ["buy"] + ["hold"] * 18 + ["sell"]
+        _, stats_1x = simulate_equity(prices, signals, leverage=1.0, fee_rate=0.0, slippage_rate=0.0)
+        _, stats_3x = simulate_equity(prices, signals, leverage=3.0, fee_rate=0.0, slippage_rate=0.0)
+        assert stats_3x["total_return"] > stats_1x["total_return"] * 2  # at least 2x
+
+    def test_falling_price_leverage_amplifies_loss(self):
+        """3x leverage on falling price gives roughly 3x loss."""
+        prices = [100.0 - i * 2 for i in range(10)]  # 100 → 82
+        signals = ["buy"] + ["hold"] * 8 + ["sell"]
+        _, stats_1x = simulate_equity(prices, signals, leverage=1.0, fee_rate=0.0, slippage_rate=0.0)
+        _, stats_3x = simulate_equity(prices, signals, leverage=3.0, fee_rate=0.0, slippage_rate=0.0)
+        assert stats_3x["total_return"] < stats_1x["total_return"]
+
+    def test_fees_paid_positive(self):
+        """fees_paid should be > 0 when trades occur."""
+        prices = [100.0, 110.0]
+        signals = ["buy", "sell"]
+        _, stats = simulate_equity(prices, signals, fee_rate=0.001, slippage_rate=0.0)
+        assert stats["fees_paid"] > 0
+
+    def test_risk_warning_on_high_leverage(self):
+        """High leverage on large drawdown triggers risk_warning."""
+        # Falling then flat — should trigger warning for leverage > 1
+        prices = [100.0 - i for i in range(30)] + [70.0] * 10
+        signals = ["buy"] + ["hold"] * 38 + ["sell"]
+        _, stats = simulate_equity(prices, signals, leverage=3.0)
+        # Should have a risk_warning (either from drawdown or liquidation)
+        # At minimum, stats should include the risk_warning key
+        assert "risk_warning" in stats

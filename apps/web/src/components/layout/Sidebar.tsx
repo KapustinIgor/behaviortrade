@@ -21,7 +21,7 @@ export function Sidebar() {
   const { data: strategies } = useStrategies();
 
   const activeStrategies = strategies?.filter((s) => s.is_active) ?? [];
-  const regime = scores?.regime ?? "sideways";
+  const regime = (scores?.regime ?? "sideways") as Regime;
 
   return (
     <aside className="w-[260px] flex-shrink-0 flex flex-col bg-surface-800 border-r border-surface-700 h-full">

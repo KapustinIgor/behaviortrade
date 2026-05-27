@@ -86,6 +86,8 @@ def _extract_metrics(features: list[float]) -> dict[str, float]:
 @router.get("/graph")
 async def get_graph() -> dict[str, Any]:
     """Return the current BehaviorGAT graph as visualization-friendly JSON."""
+    from app.core.config import settings
+
     try:
         from app.gnn.graph_builder import GraphBuilder
         gb = GraphBuilder()
@@ -100,8 +102,12 @@ async def get_graph() -> dict[str, Any]:
     model_mode = "mock"
     checkpoint_loaded = False
     try:
+        from app.gnn.service import get_gnn_inference
         from app.gnn.inference import GNNInference
-        gnn = GNNInference()
+        gnn = get_gnn_inference()
+        if gnn is None:
+            gnn = GNNInference()
+            await gnn.load_model(settings.MODEL_PATH)
         scores = await gnn.get_behavioral_scores()
         regime            = scores.get("regime", "sideways")
         confidence        = scores.get("confidence", 50.0)
@@ -190,13 +196,18 @@ async def get_graph() -> dict[str, Any]:
         "nodes": nodes,
         "edges": edges,
         "meta": {
-            "regime":           regime,
-            "gnn_confidence":   confidence,
-            "model_mode":       model_mode,
+            "regime":            regime,
+            "gnn_confidence":    confidence,
+            "model_mode":        model_mode,
             "checkpoint_loaded": checkpoint_loaded,
-            "node_count":       len(nodes),
-            "edge_count":       len(edges),
-            "generated_at":     int(time.time()),
+            "node_count":        len(nodes),
+            "edge_count":        len(edges),
+            "generated_at":      int(time.time()),
+            "model_path":        settings.MODEL_PATH,
+            "warning": (
+                "Research mode: heuristic scores, not trained GNN inference."
+                if model_mode == "mock" else None
+            ),
         },
     }
 
@@ -278,9 +289,11 @@ async def get_strategy_graph(asset: str = "BTC"):
     from app.strategies import STRATEGY_REGISTRY
     from app.strategies.signal_engine import REGIME_SCORES, compute_performance
     from app.gnn.inference import GNNInference
-    from app.main import _gnn_inference
+    from app.gnn.service import get_gnn_inference
+    from app.core.config import settings
 
-    gnn: GNNInference = _gnn_inference or GNNInference()
+    _loaded_gnn = get_gnn_inference()
+    gnn: GNNInference = _loaded_gnn if _loaded_gnn is not None else GNNInference()
     gnn_out    = await gnn.predict()
     scores     = await gnn.get_behavioral_scores()
     regime     = getattr(gnn_out, "regime", "sideways")
@@ -497,5 +510,10 @@ async def get_strategy_graph(asset: str = "BTC"):
             "node_count":        len(nodes),
             "link_count":        len(links),
             "generated_at":      int(time.time()),
+            "model_path":        settings.MODEL_PATH,
+            "warning": (
+                "Research mode: heuristic scores, not trained GNN inference."
+                if _model_mode == "mock" else None
+            ),
         },
     }

@@ -288,91 +288,129 @@ def simulate_equity(
     signals: list[str],
     leverage: float = 1.0,
     start: float = 10_000.0,
-    fee_rate: float = 0.001,        # 0.1% taker fee per side
-    slippage_rate: float = 0.0005,  # 0.05% slippage per trade
+    fee_rate: float = 0.001,
+    slippage_rate: float = 0.0005,
+    max_position_pct: float = 1.0,
+    stop_loss_pct: float | None = None,
+    take_profit_pct: float | None = None,
 ) -> tuple[list[float], dict]:
     """
-    Simulate portfolio value over time with realistic transaction costs.
+    Simulate portfolio equity over time using proper margin-based accounting.
 
-    Returns (equity_pct_series, stats).
-    equity_pct_series[i] = % return from start at time i.
+    Long-only simulation — no short selling.
 
-    Fee model: on buy we pay fee_rate on cash deployed; on sell we pay
-    fee_rate on gross proceeds. Slippage worsens fill prices by
-    slippage_rate (buy higher, sell lower).
+    Model
+    -----
+    - account_equity starts at `start`.
+    - On BUY:
+        margin_used   = account_equity * max_position_pct
+        notional      = margin_used * leverage
+        entry_price   = price * (1 + slippage_rate)
+        position_units= notional / entry_price
+        fee           = notional * fee_rate  (deducted from account_equity)
+    - While holding:
+        unrealized_pnl  = position_units * (current_price - entry_price)
+        current_equity  = account_equity + unrealized_pnl
+        stop/take-profit triggers force sell
+    - On SELL:
+        exit_price    = price * (1 - slippage_rate)
+        gross_pnl     = position_units * (exit_price - entry_price)
+        exit_fee      = abs(position_units * exit_price) * fee_rate
+        account_equity += gross_pnl - exit_fee
+
+    Returns (equity_pct_series, stats):
+    - equity_pct_series[i] = (current_equity / start - 1) * 100
+    - stats includes: total_return, win_rate, trades, max_drawdown,
+      sharpe_approx, profit_factor, benchmark_buy_hold_return,
+      fees_paid, exposure_pct, liquidation_occurred, risk_warning
     """
-    cash      = start
-    position  = 0.0   # units of asset held
-    entry     = 0.0   # effective entry price (including slippage)
+    account_equity: float = start
+    position_units: float = 0.0
+    entry_price:    float = 0.0
+    entry_notional: float = 0.0
     trades    = 0
     wins      = 0
     equity:  list[float] = []
-    events:  list[dict]  = []
 
-    peak_value        = start
+    peak_equity       = start
     max_dd            = 0.0
     pnl_wins_total    = 0.0
     pnl_losses_total  = 0.0
+    fees_paid         = 0.0
+    liquidation_occurred = False
+    exposure_pct      = 0.0
+
+    def _do_sell(price: float) -> None:
+        nonlocal account_equity, position_units, entry_price, entry_notional
+        nonlocal trades, wins, pnl_wins_total, pnl_losses_total, fees_paid
+        exit_p    = price * (1.0 - slippage_rate)
+        gross_pnl = position_units * (exit_p - entry_price)
+        exit_fee  = abs(position_units * exit_p) * fee_rate
+        fees_paid += exit_fee
+        account_equity += gross_pnl - exit_fee
+        trades += 1
+        if gross_pnl > 0:
+            wins += 1
+            pnl_wins_total += gross_pnl
+        else:
+            pnl_losses_total += abs(gross_pnl)
+        position_units = 0.0
+        entry_price    = 0.0
+        entry_notional = 0.0
 
     for i, (price, sig) in enumerate(zip(prices, signals)):
-        if sig == "buy" and position == 0.0 and price > 0:
-            # Effective buy price: worse by slippage
-            effective_buy = price * (1.0 + slippage_rate)
-            # Fee deducted from cash before buying
-            available = cash * (1.0 - fee_rate)
-            position  = (available * leverage) / effective_buy
-            entry     = effective_buy
-            cash      = 0.0
+        if price <= 0:
+            equity.append(round((account_equity / start - 1) * 100, 3))
+            continue
 
-        elif sig == "sell" and position > 0.0:
-            old_position = position
-            # Effective sell price: worse by slippage
-            effective_sell = price * (1.0 - slippage_rate)
-            gross          = old_position * effective_sell
-            # Fee deducted from proceeds
-            net            = gross * (1.0 - fee_rate)
-            cost_basis     = old_position * entry
-            pnl            = net - cost_basis
-            pnl_pct        = round(pnl / cost_basis * 100, 2) if cost_basis > 0 else 0.0
+        # Check stop-loss / take-profit while in position
+        if position_units > 0.0 and entry_price > 0.0:
+            change_pct = (price - entry_price) / entry_price * 100
+            if stop_loss_pct is not None and change_pct <= -abs(stop_loss_pct):
+                _do_sell(price)
+            elif take_profit_pct is not None and change_pct >= abs(take_profit_pct):
+                _do_sell(price)
 
-            cash     = net
-            position = 0.0
-            trades  += 1
-            if pnl > 0:
-                wins += 1
-                pnl_wins_total += pnl
-            else:
-                pnl_losses_total += abs(pnl)
+        if sig == "buy" and position_units == 0.0:
+            margin_used    = account_equity * max_position_pct
+            notional       = margin_used * leverage
+            entry_p        = price * (1.0 + slippage_rate)
+            buy_fee        = notional * fee_rate
+            fees_paid     += buy_fee
+            account_equity -= buy_fee
+            position_units  = notional / entry_p
+            entry_price     = entry_p
+            entry_notional  = notional
+            # Track maximum exposure for stats
+            exposure_pct = max(exposure_pct, notional / start * 100)
 
-            events.append({"idx": i, "action": "sell", "pnl_pct": pnl_pct})
+        elif sig == "sell" and position_units > 0.0:
+            _do_sell(price)
 
-        current_value = cash + position * price
-        equity.append(round((current_value / start - 1) * 100, 3))
+        # Current mark-to-market equity
+        unrealized_pnl = position_units * (price - entry_price) if position_units > 0 else 0.0
+        current_equity = account_equity + unrealized_pnl
 
-        # Track max drawdown
-        if current_value > peak_value:
-            peak_value = current_value
-        dd = (peak_value - current_value) / peak_value * 100 if peak_value > 0 else 0.0
+        # Liquidation: equity wiped out
+        if current_equity <= 0:
+            liquidation_occurred = True
+            current_equity = 0.0
+
+        equity.append(round((current_equity / start - 1) * 100, 3))
+
+        # Max drawdown tracking
+        if current_equity > peak_equity:
+            peak_equity = current_equity
+        dd = (peak_equity - current_equity) / peak_equity * 100 if peak_equity > 0 else 0.0
         if dd > max_dd:
             max_dd = dd
 
     # Close any open position at last price
-    if position > 0 and prices:
-        effective_sell = prices[-1] * (1.0 - slippage_rate)
-        gross          = position * effective_sell
-        net            = gross * (1.0 - fee_rate)
-        cost_basis     = position * entry
-        pnl            = net - cost_basis
-        cash           = net
-        trades        += 1
-        if pnl > 0:
-            wins += 1
-            pnl_wins_total += pnl
-        else:
-            pnl_losses_total += abs(pnl)
+    if position_units > 0.0 and prices:
+        _do_sell(prices[-1])
 
-    final_value  = cash if cash > 0 else start
-    total_return = round((final_value / start - 1) * 100, 2)
+    final_equity = account_equity
+    total_return = round((final_equity / start - 1) * 100, 2)
     win_rate     = round(wins / trades * 100, 1) if trades else 0.0
 
     # Approximate annualised Sharpe (assumes hourly series)
@@ -382,7 +420,6 @@ def simulate_equity(
         mean_c   = sum(changes) / len(changes)
         var_c    = sum((c - mean_c) ** 2 for c in changes) / len(changes)
         std_c    = math.sqrt(var_c) if var_c > 0 else 1e-9
-        # Annualise: hourly → 8760 periods/year
         sharpe   = round(mean_c / std_c * math.sqrt(8760), 3)
 
     # Profit factor
@@ -396,6 +433,20 @@ def simulate_equity(
     # Buy-and-hold benchmark
     benchmark = round((prices[-1] / prices[0] - 1) * 100, 2) if prices and prices[0] > 0 else 0.0
 
+    # Risk warning for high leverage + large drawdown or liquidation
+    risk_warning: str | None = None
+    if leverage > 1 and (max_dd > 50 or liquidation_occurred):
+        if liquidation_occurred:
+            risk_warning = (
+                f"WARNING: Liquidation occurred at {leverage}x leverage. "
+                "This position would have been wiped out."
+            )
+        else:
+            risk_warning = (
+                f"WARNING: {leverage}x leverage produced a {max_dd:.1f}% max drawdown. "
+                "High leverage significantly amplifies losses."
+            )
+
     return equity, {
         "total_return":               total_return,
         "win_rate":                   win_rate,
@@ -404,6 +455,10 @@ def simulate_equity(
         "sharpe_approx":              sharpe,
         "profit_factor":              profit_factor,
         "benchmark_buy_hold_return":  benchmark,
+        "fees_paid":                  round(fees_paid, 4),
+        "exposure_pct":               round(exposure_pct, 2),
+        "liquidation_occurred":       liquidation_occurred,
+        "risk_warning":               risk_warning,
     }
 
 
@@ -549,6 +604,10 @@ async def compute_performance(asset: str, gnn_output=None) -> dict:
                 "sharpe_approx":              stats.get("sharpe_approx", 0.0),
                 "profit_factor":              stats.get("profit_factor", 0.0),
                 "benchmark_buy_hold_return":  stats.get("benchmark_buy_hold_return", 0.0),
+                "fees_paid":                  stats.get("fees_paid", 0.0),
+                "exposure_pct":               stats.get("exposure_pct", 0.0),
+                "liquidation_occurred":       stats.get("liquidation_occurred", False),
+                "risk_warning":               stats.get("risk_warning"),
                 "regime_score":               round(regime_map.get(name, 0.5), 3),
             }
         except Exception as e:
@@ -584,6 +643,10 @@ async def compute_performance(asset: str, gnn_output=None) -> dict:
             "sharpe_approx":             combo_stats.get("sharpe_approx", 0.0),
             "profit_factor":             combo_stats.get("profit_factor", 0.0),
             "benchmark_buy_hold_return": combo_stats.get("benchmark_buy_hold_return", 0.0),
+            "fees_paid":                 combo_stats.get("fees_paid", 0.0),
+            "exposure_pct":              combo_stats.get("exposure_pct", 0.0),
+            "liquidation_occurred":      combo_stats.get("liquidation_occurred", False),
+            "risk_warning":              combo_stats.get("risk_warning"),
         },
         "gnn_regime":  regime,
         "recommended": recommended,

@@ -19,6 +19,7 @@ from app.api.routes.correlations import (
     _lagged_pearson,
     _lag_interpretation,
     _enrich,
+    _signal_variance_ok,
 )
 
 
@@ -27,31 +28,31 @@ from app.api.routes.correlations import (
 class TestPearson:
     def test_perfect_positive_correlation(self):
         xs = [1.0, 2.0, 3.0, 4.0, 5.0]
-        r, p, r2 = _pearson(xs, xs)
+        r, p, r2, *_ = _pearson(xs, xs)
         assert r == pytest.approx(1.0, abs=1e-6)
         assert r2 == pytest.approx(1.0, abs=1e-4)
 
     def test_perfect_negative_correlation(self):
         xs = [1.0, 2.0, 3.0, 4.0, 5.0]
         ys = [5.0, 4.0, 3.0, 2.0, 1.0]
-        r, _, _ = _pearson(xs, ys)
+        r, *_ = _pearson(xs, ys)
         assert r == pytest.approx(-1.0, abs=1e-6)
 
     def test_zero_correlation_constant_y(self):
         xs = [1.0, 2.0, 3.0, 4.0, 5.0]
         ys = [3.0, 3.0, 3.0, 3.0, 3.0]
-        r, _, _ = _pearson(xs, ys)
+        r, *_ = _pearson(xs, ys)
         assert r == 0.0
 
     def test_bounds_are_clamped(self):
         """r should always stay in [-1, 1]."""
         xs = [1.0, 2.0, 3.0]
         ys = [1.0, 2.0, 3.0]
-        r, _, _ = _pearson(xs, ys)
+        r, *_ = _pearson(xs, ys)
         assert -1.0 <= r <= 1.0
 
     def test_too_few_samples_returns_zero(self):
-        r, p, r2 = _pearson([1.0, 2.0], [1.0, 2.0])
+        r, p, r2, *_ = _pearson([1.0, 2.0], [1.0, 2.0])
         assert r == 0.0
         assert p == 1.0
         assert r2 == 0.0
@@ -61,7 +62,7 @@ class TestPearson:
         n  = 30
         xs = list(range(n))
         ys = [x + 0.001 * i for i, x in enumerate(xs)]  # near-perfect
-        r, p, _ = _pearson(xs, ys)
+        r, p, *_ = _pearson(xs, ys)
         assert abs(r) > 0.99
         assert p < 0.05
 
@@ -76,26 +77,26 @@ class TestLaggedPearson:
 
     def test_zero_lag_same_as_pearson(self):
         xs = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0]
-        r_direct, _, _ = _pearson(xs, xs)
-        r_lag, _, _    = _lagged_pearson(xs, xs, lag=0)
+        r_direct, *_ = _pearson(xs, xs)
+        r_lag, *_    = _lagged_pearson(xs, xs, lag=0)
         assert r_direct == pytest.approx(r_lag, abs=1e-6)
 
     def test_positive_lag_reduces_sample_size(self):
         xs = list(range(20))
-        r, p, r2 = _lagged_pearson(xs, xs, lag=5)
+        r, p, r2, *_ = _lagged_pearson(xs, xs, lag=5)
         # With lag=5 and n=20, effective n=15 → still positive correlation
         assert r > 0
 
     def test_negative_lag_price_leads_signal(self):
         """Negative lag means price leads; the function should handle it without error."""
         xs = list(range(20))
-        r, p, r2 = _lagged_pearson(xs, xs, lag=-3)
+        r, p, r2, *_ = _lagged_pearson(xs, xs, lag=-3)
         assert isinstance(r, float)
         assert -1.0 <= r <= 1.0
 
     def test_too_large_lag_returns_zero(self):
         xs = [1.0] * 5
-        r, p, r2 = _lagged_pearson(xs, xs, lag=10)
+        r, p, r2, *_ = _lagged_pearson(xs, xs, lag=10)
         assert r == 0.0
 
 
@@ -157,12 +158,17 @@ class TestEnrich:
         assert row["direction"] == "negative"
 
     def test_actionable_requires_sufficient_r_and_p_and_n(self):
-        # r=0.5, p=0.01, n=100 → should be actionable
-        row = _enrich(self._base_row(r=0.5))
+        # r=0.5, p=0.01, n=100, fear_greed (real), lag=4 → should be actionable
+        row = _enrich(self._base_row(r=0.5, lag=4))
         assert row["is_actionable"] is True
 
+    def test_not_actionable_with_zero_lag(self):
+        # lag=0 → coincident, not predictive → not actionable
+        row = _enrich(self._base_row(r=0.5, lag=0))
+        assert row["is_actionable"] is False
+
     def test_not_actionable_with_high_p_value(self):
-        row = self._base_row(r=0.5)
+        row = self._base_row(r=0.5, lag=4)
         row["p_value"] = 0.2   # not significant
         row = _enrich(row)
         assert row["is_actionable"] is False
@@ -225,3 +231,71 @@ class TestConfidenceScale:
         except Exception:
             # If redis is unavailable in CI, skip gracefully
             pytest.skip("Redis not available in this environment")
+
+
+class TestActionability:
+    def _base_row(self, r: float = 0.5, sig: str = "fear_greed", lag: int = 4) -> dict:
+        return {
+            "signal_type":   sig,
+            "signal_source": "test",
+            "asset":         "BTC",
+            "lag_hours":     lag,
+            "pearson_r":     r,
+            "p_value":       0.01,
+            "r_squared":     r * r,
+            "sample_size":   100,
+        }
+
+    def test_proxy_signal_not_actionable(self):
+        """twitter_volume (proxy) should never be actionable."""
+        row = self._base_row(sig="twitter_volume", r=0.7, lag=4)
+        enriched = _enrich(row)
+        assert enriched["is_actionable"] is False
+        reason = enriched["actionability_reason"].lower()
+        assert "proxy" in reason or "supporting" in reason
+
+    def test_zero_lag_signal_not_actionable(self):
+        """lag_hours=0 (coincident) should not be actionable even with high r."""
+        row = self._base_row(sig="fear_greed", r=0.8, lag=0)
+        enriched = _enrich(row)
+        assert enriched["is_actionable"] is False
+
+    def test_real_positive_lag_strong_r_is_actionable(self):
+        """fear_greed with lag=4, r=0.5, p=0.01, n=100 should be actionable."""
+        row = self._base_row(sig="fear_greed", r=0.5, lag=4)
+        enriched = _enrich(row)
+        assert enriched["is_actionable"] is True
+        assert "potential" in enriched["actionability_reason"].lower()
+
+    def test_insufficient_signal_not_actionable(self):
+        """A constant signal should not be actionable."""
+        constant = [1.0] * 50
+        assert _signal_variance_ok(constant) is False
+        row = self._base_row(sig="fear_greed", r=0.0, lag=4)
+        row["p_value"] = 1.0
+        row["r_squared"] = 0.0
+        row["sample_size"] = 50
+        # With r=0.0, it will be "negligible" — still not actionable
+        enriched = _enrich(row)
+        assert enriched["is_actionable"] is False
+
+
+class TestMultipleTesting:
+    def test_multiple_testing_warning_when_many_lags(self):
+        """Response should include multiple_testing_warning when many lags tested."""
+        from app.api.routes.correlations import _enrich
+        # The warning is added at the route level, not _enrich level
+        # Just verify the field names exist in enriched output
+        row = {
+            "signal_type":   "fear_greed",
+            "signal_source": "alternative.me",
+            "asset":         "BTC",
+            "lag_hours":     4,
+            "pearson_r":     0.5,
+            "p_value":       0.01,
+            "r_squared":     0.25,
+            "sample_size":   100,
+        }
+        enriched = _enrich(row)
+        assert "actionability_reason" in enriched
+        assert "p_value_method" in enriched

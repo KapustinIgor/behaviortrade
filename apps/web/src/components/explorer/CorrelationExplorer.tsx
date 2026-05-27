@@ -30,6 +30,7 @@ export function CorrelationExplorer({ onClose }: CorrelationExplorerProps) {
   const { data: topData, isLoading: topLoading } = useQuery<{
     asset: string;
     top_correlations: CorrelationResult[];
+    multiple_testing_warning?: string | null;
   }>({
     queryKey: ["correlations_top", asset],
     queryFn:  () => apiGet("/correlations/top", { asset }),
@@ -57,8 +58,9 @@ export function CorrelationExplorer({ onClose }: CorrelationExplorerProps) {
     enabled: lag !== 0,
   });
 
-  const topCorrelations   = topData?.top_correlations ?? [];
-  const sweepCorrelations = sweepData?.correlations    ?? [];
+  const topCorrelations         = topData?.top_correlations ?? [];
+  const sweepCorrelations       = sweepData?.correlations    ?? [];
+  const multipleTestingWarning  = topData?.multiple_testing_warning ?? null;
   // For the selected signal at the chosen lag — fall back to sweep data
   const lagPoint = detailData?.correlations?.[0]
     ?? sweepCorrelations.find((c) => c.lag_hours === lag);
@@ -201,6 +203,14 @@ export function CorrelationExplorer({ onClose }: CorrelationExplorerProps) {
             {topCorrelations.length > 0 && (
               <div>
                 <p className="text-xs text-gray-500 mb-2">Best correlations — {asset}</p>
+
+                {/* Multiple testing warning banner */}
+                {multipleTestingWarning && (
+                  <div className="mb-2 px-3 py-2 rounded-lg bg-yellow-500/10 border border-yellow-500/30 text-[10px] text-yellow-400 leading-relaxed">
+                    {multipleTestingWarning}
+                  </div>
+                )}
+
                 <div className="grid grid-cols-2 gap-2">
                   {topCorrelations.slice(0, 4).map((c, i) => (
                     <button
@@ -210,18 +220,27 @@ export function CorrelationExplorer({ onClose }: CorrelationExplorerProps) {
                         if (match) setSignal(match.value);
                         setLag(c.lag_hours);
                       }}
-                      className="bg-surface-700 hover:bg-surface-600 rounded-lg p-3 text-xs space-y-1 text-left transition-colors border border-transparent hover:border-brand/30"
+                      className={cn(
+                        "rounded-lg p-3 text-xs space-y-1 text-left transition-colors border hover:border-brand/30",
+                        c.data_quality !== "real"
+                          ? "bg-surface-700/50 hover:bg-surface-600/50 border-surface-700/50 opacity-70"
+                          : "bg-surface-700 hover:bg-surface-600 border-transparent"
+                      )}
                     >
                       <div className="flex items-center gap-1.5">
-                        <span className="font-semibold text-gray-300 truncate flex-1">{c.signal_source}</span>
+                        <span className={cn(
+                          "font-semibold truncate flex-1",
+                          c.data_quality !== "real" ? "text-gray-500" : "text-gray-300"
+                        )}>{c.signal_source}</span>
                         {c.data_quality && (
                           <span className={cn(
                             "px-1 py-0.5 rounded text-[9px] font-medium flex-shrink-0",
-                            c.data_quality === "real" ? "bg-green-500/20 text-green-400" :
-                            c.data_quality === "proxy" ? "bg-yellow-500/20 text-yellow-400" :
-                            "bg-gray-500/20 text-gray-400"
+                            c.data_quality === "real"         ? "bg-green-500/20 text-green-400" :
+                            c.data_quality === "proxy"        ? "bg-yellow-500/20 text-yellow-400" :
+                            c.data_quality === "insufficient" ? "bg-red-500/20 text-red-400" :
+                                                                "bg-gray-500/20 text-gray-400"
                           )}>
-                            {c.data_quality?.toUpperCase()}
+                            {c.data_quality.toUpperCase()}
                           </span>
                         )}
                       </div>
@@ -231,6 +250,14 @@ export function CorrelationExplorer({ onClose }: CorrelationExplorerProps) {
                           {c.pearson_r.toFixed(3)}
                         </span>
                       </div>
+                      {c.spearman_r != null && (
+                        <div className="flex justify-between text-gray-500">
+                          <span>Spearman R</span>
+                          <span className={cn("font-mono", c.spearman_r > 0 ? "text-bull/80" : "text-bear/80")}>
+                            {c.spearman_r.toFixed(3)}
+                          </span>
+                        </div>
+                      )}
                       <div className="flex justify-between text-gray-500">
                         <span>Best lag</span>
                         <span className="font-mono">{c.lag_hours}h</span>
@@ -238,11 +265,21 @@ export function CorrelationExplorer({ onClose }: CorrelationExplorerProps) {
                       <div className="flex justify-between text-gray-500">
                         <span>Strength</span>
                         <span className={cn("font-mono capitalize", {
-                          "text-green-400": c.strength === "strong",
+                          "text-green-400":  c.strength === "strong",
                           "text-yellow-400": c.strength === "moderate",
-                          "text-gray-400": c.strength === "weak" || c.strength === "negligible",
+                          "text-gray-400":   c.strength === "weak" || c.strength === "negligible",
                         })}>{c.strength ?? "—"}</span>
                       </div>
+                      {c.p_value_method && (
+                        <p className="text-[9px] text-gray-600 font-mono">
+                          method: {c.p_value_method}
+                        </p>
+                      )}
+                      {c.actionability_reason && (
+                        <p className="text-[9px] text-gray-500 italic leading-tight mt-0.5">
+                          {c.actionability_reason}
+                        </p>
+                      )}
                       {c.warning && (
                         <p className="text-[9px] text-yellow-400/70 leading-tight mt-0.5">{c.warning}</p>
                       )}

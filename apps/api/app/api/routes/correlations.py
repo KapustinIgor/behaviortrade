@@ -27,25 +27,54 @@ ASSET_TO_COIN = {
 
 # ── Pure math ──────────────────────────────────────────────────────────────────
 
-def _pearson(xs: list[float], ys: list[float]) -> tuple[float, float, float]:
-    """Returns (r, p_value_approx, r_squared). Both lists must be same length ≥ 3."""
+def _pearson(
+    xs: list[float], ys: list[float]
+) -> tuple[float, float, float, str, float | None, float | None, str | None]:
+    """
+    Returns (r, p_value, r_squared, method, spearman_r, spearman_p, spearman_method).
+
+    Tries scipy first for accurate statistics; falls back to normal approximation.
+    Both lists must be the same length ≥ 3.
+    """
     n = len(xs)
     if n < 3:
-        return 0.0, 1.0, 0.0
-    mx = sum(xs) / n
-    my = sum(ys) / n
-    num   = sum((x - mx) * (y - my) for x, y in zip(xs, ys))
-    dx    = math.sqrt(sum((x - mx) ** 2 for x in xs))
-    dy    = math.sqrt(sum((y - my) ** 2 for y in ys))
-    if dx == 0 or dy == 0:
-        return 0.0, 1.0, 0.0
-    r = num / (dx * dy)
-    r = max(-1.0, min(1.0, r))
-    # t-statistic → approximate two-tailed p-value via normal approximation
-    t = r * math.sqrt(n - 2) / math.sqrt(max(1e-9, 1 - r * r))
-    # rough p-value using complementary error function
-    p = 2 * (1 - _norm_cdf(abs(t)))
-    return round(r, 4), round(p, 4), round(r * r, 4)
+        return 0.0, 1.0, 0.0, "approx_normal", None, None, None
+    try:
+        from scipy import stats as scipy_stats
+        import warnings as _warnings
+        with _warnings.catch_warnings():
+            _warnings.simplefilter("ignore")
+            r, p = scipy_stats.pearsonr(xs, ys)
+            rho, sp = scipy_stats.spearmanr(xs, ys)
+        # scipy returns NaN when one input is constant — treat as zero correlation
+        import math as _math
+        if _math.isnan(float(r)):
+            return 0.0, 1.0, 0.0, "scipy_pearsonr", None, None, None
+        method = "scipy_pearsonr"
+        spearman_method: str | None = "scipy_spearmanr"
+        # spearmanr returns a SpearmanrResult; extract float p
+        sp = float(sp) if not _math.isnan(float(sp)) else None
+        rho = float(rho) if not _math.isnan(float(rho)) else None
+        if sp is None:
+            spearman_method = None
+    except ImportError:
+        mx = sum(xs) / n
+        my = sum(ys) / n
+        num   = sum((x - mx) * (y - my) for x, y in zip(xs, ys))
+        dx    = math.sqrt(sum((x - mx) ** 2 for x in xs))
+        dy    = math.sqrt(sum((y - my) ** 2 for y in ys))
+        if dx == 0 or dy == 0:
+            return 0.0, 1.0, 0.0, "approx_normal", None, None, None
+        r = num / (dx * dy)
+        t = r * math.sqrt(n - 2) / math.sqrt(max(1e-9, 1 - r * r))
+        p = 2 * (1 - _norm_cdf(abs(t)))
+        rho = None
+        sp = None
+        method = "approx_normal"
+        spearman_method = None
+    r = max(-1.0, min(1.0, float(r)))
+    p = float(p)
+    return round(r, 4), round(p, 4), round(r * r, 4), method, rho, sp, spearman_method
 
 
 def _norm_cdf(x: float) -> float:
@@ -57,7 +86,25 @@ def _pct_changes(prices: list[float]) -> list[float]:
             for i in range(1, len(prices))]
 
 
-def _lagged_pearson(price_changes: list[float], signal: list[float], lag: int) -> tuple[float, float, float]:
+def _signal_variance_ok(signal: list[float]) -> bool:
+    """Return False if the signal has insufficient variation for reliable correlation."""
+    n = len(signal)
+    if n < 3:
+        return False
+    mean = sum(signal) / n
+    std = math.sqrt(sum((v - mean) ** 2 for v in signal) / n)
+    if std < 1e-6:
+        return False
+    # More than 90% identical values
+    most_common = max(signal, key=signal.count)
+    if signal.count(most_common) / n > 0.90:
+        return False
+    return True
+
+
+def _lagged_pearson(
+    price_changes: list[float], signal: list[float], lag: int
+) -> tuple[float, float, float, str, float | None, float | None, str | None]:
     """Compute Pearson R between price_changes and signal shifted by lag hours."""
     if lag >= 0:
         # signal leads price: signal[:-lag] vs price_changes[lag:]
@@ -73,7 +120,7 @@ def _lagged_pearson(price_changes: list[float], signal: list[float], lag: int) -
         p = price_changes[:len(signal) - lag_abs]
     n = min(len(s), len(p))
     if n < 5:
-        return 0.0, 1.0, 0.0
+        return 0.0, 1.0, 0.0, "approx_normal", None, None, None
     return _pearson(s[:n], p[:n])
 
 
@@ -240,31 +287,82 @@ def _enrich(row: dict) -> dict:
     else:
         strength = "negligible"
 
+    # Data quality classification
     if sig in _PROXY_SOURCES:
         data_quality = "proxy"
         source_type  = "derived"
-        warning      = (
+        warning: str | None = (
             f"'{sig}' is a proxy derived from other signals, "
             "not a direct measurement. Treat with caution."
         )
     elif sig in _DIRECT_SOURCES:
         data_quality = "real"
         source_type  = "direct"
-        warning      = None
+        warning = None
     else:
         data_quality = "mixed"
         source_type  = "composite"
-        warning      = None
+        warning = None
+
+    # Variance check: if signal has insufficient variation, override quality
+    _signal = row.pop("_signal", None)
+    variance_ok = _signal_variance_ok(_signal) if _signal is not None else True
+    if not variance_ok:
+        data_quality = "insufficient"
+        warning = "Signal has insufficient variation for reliable correlation."
+
+    # Updated actionability: ALL conditions must hold
+    is_actionable = (
+        abs_r >= 0.4
+        and p < 0.05
+        and n >= 30
+        and data_quality == "real"
+        and variance_ok
+        and lag > 0
+    )
+
+    # Actionability reason
+    if not variance_ok:
+        actionability_reason = "No actionable signal: signal has insufficient variation."
+    elif abs_r < 0.2:
+        actionability_reason = "No actionable signal: correlation is negligible."
+    elif p >= 0.05:
+        actionability_reason = "No actionable signal: p-value not significant."
+    elif n < 30:
+        actionability_reason = "No actionable signal: insufficient sample size."
+    elif data_quality in ("proxy", "mixed"):
+        actionability_reason = "Supporting signal only: source is proxy/derived."
+    elif lag <= 0:
+        actionability_reason = "No actionable signal: lag is not predictive (lag <= 0)."
+    elif abs_r < 0.4:
+        actionability_reason = "No actionable signal: correlation is negligible."
+    else:
+        actionability_reason = (
+            "Potential signal: real data, leading lag, moderate correlation, significant."
+        )
+
+    # Pull through extra stats fields from _pearson if available
+    p_value_method   = row.pop("p_value_method", "approx_normal")
+    spearman_r       = row.pop("spearman_r", None)
+    spearman_p_value = row.pop("spearman_p_value", None)
+    spearman_method  = row.pop("spearman_method", None)
 
     row.update({
-        "strength":              strength,
-        "direction":             "positive" if r >= 0 else "negative",
-        "is_actionable":         abs_r >= 0.4 and p < 0.05 and n >= 30,
-        "effective_sample_size": n,
-        "data_quality":          data_quality,
-        "source_type":           source_type,
-        "warning":               warning,
-        "lag_interpretation":    _lag_interpretation(lag),
+        "strength":               strength,
+        "direction":              "positive" if r >= 0 else "negative",
+        "is_actionable":          is_actionable,
+        "effective_sample_size":  n,
+        "data_quality":           data_quality,
+        "source_type":            source_type,
+        "warning":                warning,
+        "lag_interpretation":     _lag_interpretation(lag),
+        "actionability_reason":   actionability_reason,
+        "p_value_method":         p_value_method,
+        "spearman_r":             round(spearman_r, 4) if spearman_r is not None else None,
+        "spearman_p_value":       round(spearman_p_value, 4) if spearman_p_value is not None else None,
+        "spearman_method":        spearman_method,
+        "signal_points_available": n,
+        "price_points_available":  n,
     })
     return row
 
@@ -289,27 +387,51 @@ async def get_correlations(
         }
 
     results = []
+    tested_signals_set = set()
+    tested_lags_set: set[int] = set()
+
     for sig_type, (source, getter) in _SIGNAL_SOURCES.items():
         if signal_type and sig_type != signal_type:
             continue
         sig_data = await getter(len(price_changes))
         lags = [int(lag_hours)] if lag_hours is not None else LAG_GRID
         for lag in lags:
-            r, p, r2 = _lagged_pearson(price_changes, sig_data, lag)
+            r, p, r2, method, rho, sp, sp_method = _lagged_pearson(price_changes, sig_data, lag)
+            tested_signals_set.add(sig_type)
+            tested_lags_set.add(lag)
             row = {
-                "signal_type":   sig_type,
-                "signal_source": source,
-                "asset":         asset,
-                "lag_hours":     lag,
-                "pearson_r":     r,
-                "p_value":       p,
-                "r_squared":     r2,
-                "sample_size":   len(price_changes),
+                "signal_type":     sig_type,
+                "signal_source":   source,
+                "asset":           asset,
+                "lag_hours":       lag,
+                "pearson_r":       r,
+                "p_value":         p,
+                "r_squared":       r2,
+                "sample_size":     len(price_changes),
+                "p_value_method":  method,
+                "spearman_r":      rho,
+                "spearman_p_value": sp,
+                "spearman_method": sp_method,
             }
             results.append(_enrich(row))
 
+    tested_signals = len(tested_signals_set)
+    tested_lags    = len(tested_lags_set)
+    multiple_testing_warning: str | None = None
+    if tested_signals * tested_lags > 1:
+        multiple_testing_warning = (
+            "Multiple comparisons were tested. Some correlations may be spurious. "
+            "Apply Bonferroni or FDR correction before acting on these results."
+        )
+
     results.sort(key=lambda x: abs(x["pearson_r"]), reverse=True)
-    return {"asset": asset, "correlations": results[:limit]}
+    return {
+        "asset":                    asset,
+        "correlations":             results[:limit],
+        "tested_lags":              tested_lags,
+        "tested_signals":           tested_signals,
+        "multiple_testing_warning": multiple_testing_warning,
+    }
 
 
 @router.post("/compute")
@@ -342,20 +464,47 @@ async def get_top_correlations(
         sig_data = await getter(len(price_changes))
         best_r, best_lag = 0.0, 0
         best_p, best_r2  = 1.0, 0.0
+        best_method      = "approx_normal"
+        best_rho: float | None = None
+        best_sp:  float | None = None
+        best_sp_method: str | None = None
         for lag in LAG_GRID:
-            r, p, r2 = _lagged_pearson(price_changes, sig_data, lag)
+            r, p, r2, method, rho, sp, sp_method = _lagged_pearson(price_changes, sig_data, lag)
             if abs(r) > abs(best_r):
                 best_r, best_lag, best_p, best_r2 = r, lag, p, r2
+                best_method = method
+                best_rho    = rho
+                best_sp     = sp
+                best_sp_method = sp_method
         row = {
-            "signal_type":   sig_type,
-            "signal_source": source,
-            "lag_hours":     best_lag,
-            "pearson_r":     best_r,
-            "p_value":       best_p,
-            "r_squared":     best_r2,
-            "sample_size":   len(price_changes),
+            "signal_type":     sig_type,
+            "signal_source":   source,
+            "lag_hours":       best_lag,
+            "pearson_r":       best_r,
+            "p_value":         best_p,
+            "r_squared":       best_r2,
+            "sample_size":     len(price_changes),
+            "p_value_method":  best_method,
+            "spearman_r":      best_rho,
+            "spearman_p_value": best_sp,
+            "spearman_method": best_sp_method,
         }
         best.append(_enrich(row))
 
+    tested_signals = len(_SIGNAL_SOURCES)
+    tested_lags    = len(LAG_GRID)
+    multiple_testing_warning: str | None = None
+    if tested_signals * tested_lags > 1:
+        multiple_testing_warning = (
+            "Multiple comparisons were tested. Some correlations may be spurious. "
+            "Apply Bonferroni or FDR correction before acting on these results."
+        )
+
     best.sort(key=lambda x: abs(x["pearson_r"]), reverse=True)
-    return {"asset": asset, "top_correlations": best[:limit]}
+    return {
+        "asset":                    asset,
+        "top_correlations":         best[:limit],
+        "tested_lags":              tested_lags,
+        "tested_signals":           tested_signals,
+        "multiple_testing_warning": multiple_testing_warning,
+    }

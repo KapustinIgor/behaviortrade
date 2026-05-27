@@ -204,8 +204,10 @@ async def lifespan(app: FastAPI):
 
     # Load GNN checkpoint if available
     from app.gnn.inference import GNNInference
+    from app.gnn.service import set_gnn_inference
     _gnn_inference = GNNInference()
     await _gnn_inference.load_model(settings.MODEL_PATH)
+    set_gnn_inference(_gnn_inference)
 
     # Start Reddit polling loop (public JSON endpoints — no credentials required)
     from app.workers.reddit_sentiment import stream_loop

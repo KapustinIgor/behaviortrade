@@ -432,6 +432,11 @@ export function BehaviorGraph({ onClose }: BehaviorGraphProps) {
             <span className="text-gray-600 text-xs">
               {meta.node_count} nodes · {meta.edge_count} edges
             </span>
+            {meta.model_mode === "mock" && (
+              <span className="text-yellow-400/80 text-xs italic ml-2">
+                Research mode: heuristic scores, not trained GNN inference.
+              </span>
+            )}
           </>
         )}
 

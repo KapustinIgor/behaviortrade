@@ -296,7 +296,7 @@ export function StrategyGraph3D({ onClose }: StrategyGraph3DProps) {
           <div>
             <h2 className="text-base font-bold text-white">Strategy GNN Graph — 3D</h2>
             {meta && (
-              <div className="flex items-center gap-2 mt-0.5">
+              <div className="flex items-center gap-2 mt-0.5 flex-wrap">
                 <p className="text-xs text-gray-500">
                   {selectedAsset} · {meta.node_count} nodes · {meta.link_count} links ·{" "}
                   <span className="capitalize text-warn">{meta.regime}</span>{" "}
@@ -312,6 +312,11 @@ export function StrategyGraph3D({ onClose }: StrategyGraph3DProps) {
                 >
                   {meta.model_mode === "trained" ? "TRAINED" : "MOCK"}
                 </span>
+                {meta.model_mode === "mock" && (
+                  <span className="text-yellow-400/70 text-[10px] italic">
+                    Research mode: heuristic scores, not trained GNN inference.
+                  </span>
+                )}
               </div>
             )}
           </div>

@@ -31,7 +31,7 @@ export function BehaviorScores() {
     <div className="flex flex-col">
       <PanelHeader
         title="Behavioral Scores"
-        badge={display && <RegimeBadge regime={display.regime} />}
+        badge={display && <RegimeBadge regime={display.regime as import("@/types").Regime} />}
         actions={liveIndicator}
       />
 

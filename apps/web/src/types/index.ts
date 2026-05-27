@@ -12,14 +12,15 @@ export interface BehavioralScores {
   greed_score: number;
   accumulation_score: number;
   distribution_score: number;
-  regime: Regime;
+  regime: string;
   confidence: number;
   news_shock_score: number;
   direction_1h: number;
   direction_4h: number;
   direction_24h: number;
-  updated_at?: string;
-  [key: string]: number | string | undefined;
+  model_mode?: "mock" | "trained";
+  checkpoint_loaded?: boolean;
+  [key: string]: number | string | boolean | undefined;
 }
 
 export type Regime = "bull" | "bear" | "sideways" | "transition";
@@ -83,7 +84,7 @@ export interface MarketData {
 export interface CorrelationResult {
   signal_type: string;
   signal_source: string;
-  asset: string;
+  asset?: string;
   lag_hours: number;
   pearson_r: number;
   p_value: number;
@@ -94,10 +95,17 @@ export interface CorrelationResult {
   direction?: "positive" | "negative";
   is_actionable?: boolean;
   effective_sample_size?: number;
-  data_quality?: "real" | "proxy" | "mixed";
+  data_quality?: "real" | "proxy" | "mixed" | "insufficient";
   source_type?: "direct" | "derived" | "composite";
   warning?: string | null;
   lag_interpretation?: string;
+  actionability_reason?: string;
+  p_value_method?: string;
+  spearman_r?: number | null;
+  spearman_p_value?: number | null;
+  spearman_method?: string | null;
+  signal_points_available?: number;
+  price_points_available?: number;
 }
 
 export interface WhaleFlow {

@@ -26,15 +26,15 @@ router = APIRouter()
 # ── Request / Response schemas ────────────────────────────────────────────────
 
 class PaperTradeCreate(BaseModel):
-    asset:      str = Field(..., example="BTC", description="Asset symbol")
-    direction:  str = Field(..., example="long", pattern="^(long|short)$")
+    asset:       str   = Field(..., description="Asset symbol, e.g. BTC")
+    direction:   str   = Field(..., pattern="^(long|short)$")
     entry_price: float = Field(..., gt=0)
-    size_usd:   float = Field(default=1000.0, gt=0, le=100_000)
-    strategy:   Optional[str] = None
-    signal_id:  Optional[str] = None
-    model_mode: str = Field(default="mock", pattern="^(mock|trained)$")
-    regime:     Optional[str] = None
-    note:       Optional[str] = None
+    size_usd:    float = Field(default=1000.0, gt=0, le=100_000)
+    strategy:    Optional[str] = None
+    signal_id:   Optional[str] = None
+    model_mode:  str   = Field(default="mock", pattern="^(mock|trained)$")
+    regime:      Optional[str] = None
+    note:        Optional[str] = None
 
 
 class PaperTradeClose(BaseModel):
@@ -42,6 +42,8 @@ class PaperTradeClose(BaseModel):
 
 
 class PaperTradeOut(BaseModel):
+    model_config = {"from_attributes": True}
+
     id:          int
     asset:       str
     direction:   str
@@ -56,9 +58,6 @@ class PaperTradeOut(BaseModel):
     signal_id:   Optional[str]
     opened_at:   datetime
     closed_at:   Optional[datetime]
-
-    class Config:
-        from_attributes = True
 
 
 def _to_out(t: PaperTrade) -> dict:
@@ -131,6 +130,35 @@ async def create_paper_trade(
     }
 
 
+@router.get("/summary/stats")
+async def paper_trade_stats(
+    asset: Optional[str] = Query(default=None),
+    db: AsyncSession = Depends(get_db),
+):
+    """Aggregate P&L statistics across all closed paper trades."""
+    stmt = select(PaperTrade).where(PaperTrade.is_open == False)  # noqa: E712
+    if asset:
+        stmt = stmt.where(PaperTrade.asset == asset.upper())
+    result = await db.execute(stmt)
+    closed = result.scalars().all()
+
+    if not closed:
+        return {"total_trades": 0, "win_rate": 0.0, "avg_return_pct": 0.0, "total_pnl_pct": 0.0}
+
+    returns = [t.result_pct for t in closed if t.result_pct is not None]
+    wins    = [r for r in returns if r > 0]
+    win_rate = round(len(wins) / len(returns) * 100, 1) if returns else 0.0
+    avg_ret  = round(sum(returns) / len(returns), 3) if returns else 0.0
+    total    = round(sum(returns), 3)
+
+    return {
+        "total_trades":    len(closed),
+        "win_rate":        win_rate,
+        "avg_return_pct":  avg_ret,
+        "total_pnl_pct":   total,
+    }
+
+
 @router.get("/{trade_id}")
 async def get_paper_trade(
     trade_id: int,
@@ -176,33 +204,4 @@ async def close_paper_trade(
         "message": "Paper trade closed",
         "trade": _to_out(trade),
         "result_pct": result_pct,
-    }
-
-
-@router.get("/summary/stats")
-async def paper_trade_stats(
-    asset: Optional[str] = Query(default=None),
-    db: AsyncSession = Depends(get_db),
-):
-    """Aggregate P&L statistics across all closed paper trades."""
-    stmt = select(PaperTrade).where(PaperTrade.is_open == False)  # noqa: E712
-    if asset:
-        stmt = stmt.where(PaperTrade.asset == asset.upper())
-    result = await db.execute(stmt)
-    closed = result.scalars().all()
-
-    if not closed:
-        return {"total_trades": 0, "win_rate": 0.0, "avg_return_pct": 0.0, "total_pnl_pct": 0.0}
-
-    returns = [t.result_pct for t in closed if t.result_pct is not None]
-    wins    = [r for r in returns if r > 0]
-    win_rate = round(len(wins) / len(returns) * 100, 1) if returns else 0.0
-    avg_ret  = round(sum(returns) / len(returns), 3) if returns else 0.0
-    total    = round(sum(returns), 3)
-
-    return {
-        "total_trades":    len(closed),
-        "win_rate":        win_rate,
-        "avg_return_pct":  avg_ret,
-        "total_pnl_pct":   total,
     }

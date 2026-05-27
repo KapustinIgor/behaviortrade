@@ -282,19 +282,54 @@ async def ws_live(websocket: WebSocket):
 
 @app.websocket("/ws/behavioral")
 async def ws_behavioral(websocket: WebSocket):
-    """Streams behavioral score updates directly to the frontend."""
+    """
+    Streams behavioral score updates directly to the frontend.
+
+    Two concurrent tasks run in parallel:
+      • _sender   — reads from Redis pub/sub and pushes to the WS client
+      • _receiver — waits for the client to close (or send a ping)
+    When either task finishes (disconnect, error, server shutdown) the other
+    is cancelled immediately, avoiding the ECONNRESET log spam.
+    """
     await websocket.accept()
     r = await get_redis()
     pubsub = r.pubsub()
     await pubsub.subscribe("behavioral_scores")
+
+    async def _sender() -> None:
+        try:
+            async for message in pubsub.listen():
+                if message["type"] == "message":
+                    payload = (
+                        message["data"] if isinstance(message["data"], str)
+                        else message["data"].decode()
+                    )
+                    await websocket.send_text(payload)
+        except Exception:
+            pass
+
+    async def _receiver() -> None:
+        try:
+            while True:
+                await websocket.receive_text()   # blocks until client sends or closes
+        except Exception:
+            pass
+
+    sender_task   = asyncio.create_task(_sender())
+    receiver_task = asyncio.create_task(_receiver())
+
     try:
-        async for message in pubsub.listen():
-            if message["type"] == "message":
-                await websocket.send_text(
-                    message["data"] if isinstance(message["data"], str)
-                    else message["data"].decode()
-                )
-    except WebSocketDisconnect:
-        pass
+        # Wait for whichever task finishes first (disconnect or server error)
+        done, pending = await asyncio.wait(
+            {sender_task, receiver_task},
+            return_when=asyncio.FIRST_COMPLETED,
+        )
     finally:
+        for task in (sender_task, receiver_task):
+            if not task.done():
+                task.cancel()
+                try:
+                    await task
+                except (asyncio.CancelledError, Exception):
+                    pass
         await pubsub.unsubscribe("behavioral_scores")
